@@ -720,16 +720,14 @@ namespace Apostol {
 
             SplitColumns(sPath, slRouts, '/');
 
-            sPath = "~";
+            sPath = "~/";
 
             if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::not_found);
                 return;
             } if (slRouts.Count() == 2) {
-                sPath << "/";
                 sName << APOSTOL_INDEX_FILE;
             } else {
-                sPath << "/";
                 for (int i = 2; i < slRouts.Count() - 1; ++i) {
                     sPath << slRouts[i];
                     sPath << "/";
