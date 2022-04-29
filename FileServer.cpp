@@ -755,11 +755,9 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::Heartbeat() {
-            auto now = Now();
-
-            if ((now >= m_FixedDate)) {
-                m_FixedDate = now + (CDateTime) 30 / MinsPerDay; // 30 min
+        void CFileServer::Heartbeat(CDateTime DateTime) {
+            if ((DateTime >= m_FixedDate)) {
+                m_FixedDate = DateTime + (CDateTime) 30 / MinsPerDay; // 30 min
             }
         }
         //--------------------------------------------------------------------------------------------------------------

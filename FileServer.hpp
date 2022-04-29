@@ -97,7 +97,7 @@ namespace Apostol {
             static CString GetSession(CHTTPRequest *ARequest);
             static bool CheckSession(CHTTPRequest *ARequest, CString &Session);
 
-            void Heartbeat() override;
+            void Heartbeat(CDateTime DateTime) override;
 
             bool Enabled() override;
 
