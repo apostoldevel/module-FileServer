@@ -34,7 +34,7 @@ extern "C++" {
 
 namespace Apostol {
 
-    namespace Workers {
+    namespace Module {
 
         CString squeeze(const CString &data, const char litter = '\n') {
             CString result;
@@ -56,7 +56,7 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CFileServer::CFileServer(CModuleProcess *AProcess) : CApostolModule(AProcess, "file server", "worker/FileServer") {
+        CFileServer::CFileServer(CModuleProcess *AProcess) : CApostolModule(AProcess, "file server", "module/FileServer") {
             m_Headers.Add("Authorization");
             m_Headers.Add("Session");
             m_Headers.Add("Secret");
