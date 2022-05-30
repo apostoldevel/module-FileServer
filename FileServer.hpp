@@ -31,6 +31,57 @@ namespace Apostol {
 
     namespace Module {
 
+        class CFileServer;
+        class CFileHandler;
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileHandler ----------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        typedef std::function<void (CFileHandler *Handler)> COnFileHandlerEvent;
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CFileHandler: public CPollConnection {
+        private:
+
+            CFileServer *m_pModule;
+
+            CString m_Session;
+
+            bool m_Allow;
+
+            CJSON m_Payload;
+
+            COnFileHandlerEvent m_Handler;
+
+            int AddToQueue();
+            void RemoveFromQueue();
+
+        protected:
+
+            void SetAllow(bool Value) { m_Allow = Value; }
+
+        public:
+
+            CFileHandler(CFileServer *AModule, const CString &Session, const CString &Data, COnFileHandlerEvent && Handler);
+
+            ~CFileHandler() override;
+
+            const CString &Session() const { return m_Session; }
+
+            const CJSON &Payload() const { return m_Payload; }
+
+            bool Allow() const { return m_Allow; };
+            void Allow(bool Value) { SetAllow(Value); };
+
+            bool Handler();
+
+            void Close() override;
+
+        };
+
         //--------------------------------------------------------------------------------------------------------------
 
         //-- CFileServer -----------------------------------------------------------------------------------------------
@@ -40,29 +91,55 @@ namespace Apostol {
         class CFileServer: public CApostolModule {
         private:
 
-            CDateTime m_FixedDate;
+            CStringList m_Sessions;
+
+            CString m_Path;
+            CString m_Agent;
+            CString m_Host;
+
+            CQueue m_Queue;
+            CQueueManager m_QueueManager;
+
+            CDateTime m_CheckDate;
+            CDateTime m_AuthDate;
+
+            size_t m_Progress;
+            size_t m_MaxQueue;
+
+            void InitListen();
+            void CheckListen();
+
+            void Authentication();
+            void SignOut(const CString &Session);
+
+            void UnloadQueue();
 
             void InitMethods() override;
 
-            static void AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload);
+            void DeleteHandler(CFileHandler *AHandler);
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
             static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
-
-            static void ReplyQuery(CHTTPServerConnection *AConnection, CPQResult *AResult);
-
-            static int CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError = false);
+            static int CheckError(const CJSON &Json, CString &ErrorMessage);
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
+            static void DeleteFile(const CString &FileName);
+
+            void VerifyToken(const CString &Token);
 
         protected:
+
+            void DoError(const Delphi::Exception::Exception &E);
+
+            void DoFile(CFileHandler *AHandler);
+            void DoCallBack( const CString &Callback, const CString &Object, const CString &Name, const CString &Path, const CString &File);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
 
-            void DoFile(CHTTPServerConnection *AConnection, const CString &Method, const CString &Id, const CString &Path = "~/", const CString &Name = CString());
-            void DoFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                COnPQPollQueryExecutedEvent && OnExecuted = nullptr, COnPQPollQueryExceptionEvent && OnException = nullptr);
+            void DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Id, const CString &Path = "/", const CString &Name = CString());
+
+            void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
 
             void DoPostgresQueryExecuted(CPQPollQuery *APollQuery) override;
             void DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) override;
@@ -77,31 +154,31 @@ namespace Apostol {
                 return new CFileServer(AProcess);
             }
 
-            CString VerifyToken(const CString &Token);
+            void Initialization(CModuleProcess *AProcess) override;
 
-            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+            CPQPollQuery *GetQuery(CPollConnection *AConnection) override;
 
-            void UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Agent, const CString &Host,
-                COnPQPollQueryExecutedEvent && OnExecuted = nullptr, COnPQPollQueryExceptionEvent && OnException = nullptr);
-
-            void AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
-                const CString &Method, const CString &Path, const CString &Payload, const CString &Agent, const CString &Host,
-                COnPQPollQueryExecutedEvent && OnExecuted = nullptr, COnPQPollQueryExceptionEvent && OnException = nullptr);
-
-            void SignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
-                const CString &Agent, const CString &Host, long int ReceiveWindow = 5000,
-                COnPQPollQueryExecutedEvent && OnExecuted = nullptr, COnPQPollQueryExceptionEvent && OnException = nullptr);
-
-            static CString GetSession(CHTTPRequest *ARequest);
-            static bool CheckSession(CHTTPRequest *ARequest, CString &Session);
-
-            void Heartbeat(CDateTime DateTime) override;
+            void Heartbeat(CDateTime Now) override;
 
             bool Enabled() override;
 
             bool CheckLocation(const CLocation &Location) override;
+            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+
+            void IncProgress() { m_Progress++; }
+            void DecProgress() { m_Progress--; }
+
+            int AddToQueue(CFileHandler *AHandler);
+            void InsertToQueue(int Index, CFileHandler *AHandler);
+            void RemoveFromQueue(CFileHandler *AHandler);
+
+            CQueue &Queue() { return m_Queue; }
+            const CQueue &Queue() const { return m_Queue; }
+
+            CPollManager *ptrQueueManager() { return &m_QueueManager; }
+
+            CPollManager &QueueManager() { return m_QueueManager; }
+            const CPollManager &QueueManager() const { return m_QueueManager; }
 
         };
     }

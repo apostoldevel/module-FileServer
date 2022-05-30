@@ -27,6 +27,15 @@ Author:
 #include "FileServer.hpp"
 //----------------------------------------------------------------------------------------------------------------------
 
+#define API_BOT_USERNAME "apibot"
+
+#define QUERY_INDEX_AUTH     0
+#define QUERY_INDEX_DATA     1
+
+#define PG_CONFIG_NAME "helper"
+#define PG_LISTEN_NAME "file"
+//----------------------------------------------------------------------------------------------------------------------
+
 #include "jwt.h"
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -52,18 +61,66 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        //-- CFileServer ---------------------------------------------------------------------------------------------
+        //-- CFileHandler ----------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileHandler::CFileHandler(CFileServer *AModule, const CString &Session, const CString &Data, COnFileHandlerEvent &&Handler):
+                CPollConnection(AModule->ptrQueueManager()), m_Allow(true) {
+            m_pModule = AModule;
+            m_Session = Session;
+            m_Payload = Data;
+            m_Handler = Handler;
+
+            AddToQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileHandler::~CFileHandler() {
+            RemoveFromQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileHandler::Close() {
+            m_Allow = false;
+            RemoveFromQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CFileHandler::AddToQueue() {
+            return m_pModule->AddToQueue(this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileHandler::RemoveFromQueue() {
+            m_pModule->RemoveFromQueue(this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        bool CFileHandler::Handler() {
+            if (m_Allow && m_Handler) {
+                m_Handler(this);
+                return true;
+            }
+            return false;
+        }
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServer -----------------------------------------------------------------------------------------------
 
         //--------------------------------------------------------------------------------------------------------------
 
         CFileServer::CFileServer(CModuleProcess *AProcess) : CApostolModule(AProcess, "file server", "module/FileServer") {
             m_Headers.Add("Authorization");
-            m_Headers.Add("Session");
-            m_Headers.Add("Secret");
-            m_Headers.Add("Nonce");
-            m_Headers.Add("Signature");
 
-            m_FixedDate = Now();
+            m_Agent = CString().Format("File Server (%s)", GApplication->Title().c_str());
+            m_Host = CApostolModule::GetIPByHostName(CApostolModule::GetHostName());
+
+            m_CheckDate = 0;
+            m_AuthDate = 0;
+            m_Progress = 0;
+            m_MaxQueue = Config()->PostgresPollMin();
 
             CFileServer::InitMethods();
         }
@@ -125,7 +182,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        int CFileServer::CheckError(const CJSON &Json, CString &ErrorMessage, bool RaiseIfError) {
+        int CFileServer::CheckError(const CJSON &Json, CString &ErrorMessage) {
             int errorCode = 0;
 
             if (Json.HasOwnProperty(_T("error"))) {
@@ -143,9 +200,6 @@ namespace Apostol {
                     ErrorMessage = _T("Invalid request.");
                 }
 
-                if (RaiseIfError)
-                    throw EDBError(ErrorMessage.c_str());
-
                 if (errorCode >= 10000)
                     errorCode = errorCode / 100;
 
@@ -157,32 +211,12 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        CString CFileServer::GetSession(CHTTPRequest *ARequest) {
-            const auto& headerSession = ARequest->Headers.Values(_T("Session"));
-            const auto& cookieSession = ARequest->Cookies.Values(_T("SID"));
-
-            return headerSession.IsEmpty() ? cookieSession : headerSession;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CFileServer::CheckSession(CHTTPRequest *ARequest, CString &Session) {
-            const auto& caSession = GetSession(ARequest);
-
-            if (caSession.Length() != 40)
-                return false;
-
-            Session = caSession;
-
-            return true;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        CString CFileServer::VerifyToken(const CString &Token) {
+        void CFileServer::VerifyToken(const CString &Token) {
 
             const auto& GetSecret = [](const CProvider &Provider, const CString &Application) {
                 const auto &Secret = Provider.Secret(Application);
                 if (Secret.IsEmpty())
-                    throw ExceptionFrm("Not found Secret for \"%s:%s\"", Provider.Name().c_str(), Application.c_str());
+                    throw ExceptionFrm("Not found secret for \"%s:%s\"", Provider.Name().c_str(), Application.c_str());
                 return Secret;
             };
 
@@ -207,85 +241,22 @@ namespace Apostol {
                 throw jwt::token_verification_exception("Token doesn't contain the required issuer.");
 
             const auto& alg = decoded.get_algorithm();
-            const auto& ch = alg.substr(0, 2);
 
-            const auto& Secret = GetSecret(Provider, Application);
+            const auto& caSecret = GetSecret(Provider, Application);
 
-            if (ch == "HS") {
-                if (alg == "HS256") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::hs256{Secret});
-                    verifier.verify(decoded);
-
-                    return Token; // if algorithm HS256
-                } else if (alg == "HS384") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::hs384{Secret});
-                    verifier.verify(decoded);
-                } else if (alg == "HS512") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::hs512{Secret});
-                    verifier.verify(decoded);
-                }
-            } else if (ch == "RS") {
-
-                const auto& kid = decoded.get_key_id();
-                const auto& key = OAuth2::Helper::GetPublicKey(Providers, kid);
-
-                if (alg == "RS256") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::rs256{key});
-                    verifier.verify(decoded);
-                } else if (alg == "RS384") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::rs384{key});
-                    verifier.verify(decoded);
-                } else if (alg == "RS512") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::rs512{key});
-                    verifier.verify(decoded);
-                }
-            } else if (ch == "ES") {
-
-                const auto& kid = decoded.get_key_id();
-                const auto& key = OAuth2::Helper::GetPublicKey(Providers, kid);
-
-                if (alg == "ES256") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::es256{key});
-                    verifier.verify(decoded);
-                } else if (alg == "ES384") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::es384{key});
-                    verifier.verify(decoded);
-                } else if (alg == "ES512") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::es512{key});
-                    verifier.verify(decoded);
-                }
-            } else if (ch == "PS") {
-
-                const auto& kid = decoded.get_key_id();
-                const auto& key = OAuth2::Helper::GetPublicKey(Providers, kid);
-
-                if (alg == "PS256") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::ps256{key});
-                    verifier.verify(decoded);
-                } else if (alg == "PS384") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::ps384{key});
-                    verifier.verify(decoded);
-                } else if (alg == "PS512") {
-                    auto verifier = jwt::verify()
-                            .allow_algorithm(jwt::algorithm::ps512{key});
-                    verifier.verify(decoded);
-                }
+            if (alg == "HS256") {
+                auto verifier = jwt::verify()
+                        .allow_algorithm(jwt::algorithm::hs256{caSecret});
+                verifier.verify(decoded);
+            } else if (alg == "HS384") {
+                auto verifier = jwt::verify()
+                        .allow_algorithm(jwt::algorithm::hs384{caSecret});
+                verifier.verify(decoded);
+            } else if (alg == "HS512") {
+                auto verifier = jwt::verify()
+                        .allow_algorithm(jwt::algorithm::hs512{caSecret});
+                verifier.verify(decoded);
             }
-
-            const auto& Result = CCleanToken(R"({"alg":"HS256","typ":"JWT"})", decoded.get_payload(), true);
-
-            return Result.Sign(jwt::algorithm::hs256{Secret});
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -323,7 +294,7 @@ namespace Apostol {
             try {
                 if (CheckAuthorizationData(pRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
-                        Authorization.Token = VerifyToken(Authorization.Token);
+                        VerifyToken(Authorization.Token);
                         return true;
                     }
                 }
@@ -346,310 +317,181 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::AfterQuery(CHTTPServerConnection *AConnection, const CString &Path, const CJSON &Payload) {
-
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::ReplyQuery(CHTTPServerConnection *AConnection, CPQResult *AResult) {
-
-            auto pRequest = AConnection->Request();
-            auto pReply = AConnection->Reply();
-
-            pReply->ContentType = CHTTPReply::json;
-
-            CString errorMessage;
-
-            CStringList ResultObject;
-            CStringList ResultFormat;
-
-            ResultObject.Add("true");
-            ResultObject.Add("false");
-
-            ResultFormat.Add("object");
-            ResultFormat.Add("array");
-            ResultFormat.Add("null");
-
-            const auto &result_object = pRequest->Params[_T("result_object")];
-            const auto &result_format = pRequest->Params[_T("result_format")];
-
-            if (!result_object.IsEmpty() && ResultObject.IndexOfName(result_object) == -1) {
-                ReplyError(AConnection, CHTTPReply::bad_request, CString().Format("Invalid result_object: %s", result_object.c_str()));
-                return;
-            }
-
-            if (!result_format.IsEmpty() && ResultFormat.IndexOfName(result_format) == -1) {
-                ReplyError(AConnection, CHTTPReply::bad_request, CString().Format("Invalid result_format: %s", result_format.c_str()));
-                return;
-            }
-
-            const auto &patch = AConnection->Data()["path"].Lower();
-            const auto bDataArray = patch.Find(_T("/list")) != CString::npos;
-
-            CString Format(result_format);
-            if (Format.IsEmpty() && bDataArray)
-                Format = "array";
-
-            CHTTPReply::CStatusType status = CHTTPReply::ok;
-
-            try {
-                if (AResult->nTuples() == 1) {
-                    const CJSON Payload(AResult->GetValue(0, 0));
-                    status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
-                    if (status == CHTTPReply::ok) {
-                        AfterQuery(AConnection, patch, Payload);
-                    }
+        void CFileServer::DeleteFile(const CString &FileName) {
+            if (FileExists(FileName.c_str())) {
+                if (::unlink(FileName.c_str()) == FILE_ERROR) {
+                    Log()->Error(APP_LOG_ALERT, errno, _T("could not delete file: \"%s\" error: "), FileName.c_str());
                 }
-
-                PQResultToJson(AResult, pReply->Content, Format, result_object == "true" ? "result" : CString());
-
-                if (status == CHTTPReply::ok && !pReply->CacheFile.IsEmpty()) {
-                    pReply->Content.SaveToFile(pReply->CacheFile.c_str());
-                }
-            } catch (Delphi::Exception::Exception &E) {
-                errorMessage = E.what();
-                status = CHTTPReply::bad_request;
-                Log()->Error(APP_LOG_ERR, 0, "%s", E.what());
-            }
-
-            if (status == CHTTPReply::ok) {
-                AConnection->SendReply(status, nullptr, true);
-            } else {
-                ReplyError(AConnection, status, errorMessage);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::UnauthorizedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Agent, const CString &Host,
-                COnPQPollQueryExecutedEvent &&OnExecuted, COnPQPollQueryExceptionEvent &&OnException) {
+        void CFileServer::DoError(const Delphi::Exception::Exception &E) {
+            m_AuthDate = 0;
+            Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", E.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
 
+        void CFileServer::DoCallBack(const CString &Callback, const CString &Object, const CString &Name,
+                const CString &Path, const CString &File) {
             CStringList SQL;
 
-            const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-            SQL.Add(CString()
-                .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                .Format("SELECT * FROM daemon.unauthorized_fetch(%s, %s, %s::jsonb, %s, %s);",
-                                     PQQuoteLiteral(Method).c_str(),
+            SQL.Add(CString().MaxFormatSize(256 + Callback.Size() + Object.Size() + Name.Size() + Path.Size() + File.Size())
+                                .Format("SELECT %s(%s, %s, %s, %s);",
+                                     Callback.c_str(),
+                                     PQQuoteLiteral(Object).c_str(),
+                                     PQQuoteLiteral(Name).c_str(),
                                      PQQuoteLiteral(Path).c_str(),
-                                     caPayload.c_str(),
-                                     PQQuoteLiteral(Agent).c_str(),
-                                     PQQuoteLiteral(Host).c_str()
-            ));
-
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
-            AConnection->Data().Values("authorized", "false");
-            AConnection->Data().Values("signature", "false");
+                                     PQQuoteLiteral(File).c_str()));
 
             try {
-                ExecSQL(SQL, AConnection, std::move(OnExecuted), std::move(OnException));
+                ExecSQL(SQL);
             } catch (Delphi::Exception::Exception &E) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
-                Log()->Error(APP_LOG_ERR, 0, "%s", E.what());
+                DoError(E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::AuthorizedFetch(CHTTPServerConnection *AConnection, const CAuthorization &Authorization,
-                const CString &Method, const CString &Path, const CString &Payload, const CString &Agent, const CString &Host,
-                COnPQPollQueryExecutedEvent &&OnExecuted, COnPQPollQueryExceptionEvent &&OnException) {
+        void CFileServer::DoFile(CFileHandler *AHandler) {
 
-            CStringList SQL;
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
-            if (Authorization.Schema == CAuthorization::asBearer) {
+                CPQueryResults pqResults;
 
-                const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
 
-                SQL.Add(CString()
-                    .MaxFormatSize(256 + Authorization.Token.Size() + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                    .Format("SELECT * FROM daemon.fetch(%s, %s, %s, %s::jsonb, %s, %s);",
-                                         PQQuoteLiteral(Authorization.Token).c_str(),
-                                         PQQuoteLiteral(Method).c_str(),
-                                         PQQuoteLiteral(Path).c_str(),
-                                         caPayload.c_str(),
-                                         PQQuoteLiteral(Agent).c_str(),
-                                         PQQuoteLiteral(Host).c_str()
-                ));
+                try {
+                    CApostolModule::QueryToResults(APollQuery, pqResults);
 
-            } else if (Authorization.Schema == CAuthorization::asBasic) {
+                    const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
 
-                const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
+                    if (authorize["authorized"] != "t")
+                        throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
 
-                SQL.Add(CString()
-                    .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Agent.Size())
-                    .Format("SELECT * FROM daemon.%s_fetch(%s, %s, %s, %s, %s::jsonb, %s, %s);",
-                                         Authorization.Type == CAuthorization::atSession ? "session" : "authorized",
-                                         PQQuoteLiteral(Authorization.Username).c_str(),
-                                         PQQuoteLiteral(Authorization.Password).c_str(),
-                                         PQQuoteLiteral(Method).c_str(),
-                                         PQQuoteLiteral(Path).c_str(),
-                                         caPayload.c_str(),
-                                         PQQuoteLiteral(Agent).c_str(),
-                                         PQQuoteLiteral(Host).c_str()
-                ));
+                    if (pqResults[QUERY_INDEX_DATA].Count() == 1) {
+                        const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
-            } else {
+                        const auto &object = caFile["object"];
+                        const auto &name = caFile["name"];
+                        const auto &path = caFile["path"];
+                        const auto &data = caFile["data"];
+                        const auto &callback = caFile["callback"];
 
-                return UnauthorizedFetch(AConnection, Method, Path, Payload, Agent, Host, std::move(OnExecuted), std::move(OnException));
+                        if (!data.empty()) {
+                            const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                            CApplication::MkDir(caFilePath);
+                            const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
-            }
+                            DeleteFile(caFileName);
 
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
-            AConnection->Data().Values("authorized", "true");
-            AConnection->Data().Values("signature", "false");
+                            auto decode = base64_decode(squeeze(data));
+                            decode.SaveToFile(caFileName.c_str());
 
-            try {
-                ExecSQL(SQL, AConnection, std::move(OnExecuted), std::move(OnException));
-            } catch (Delphi::Exception::Exception &E) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
-                Log()->Error(APP_LOG_ERR, 0, "%s", E.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::SignedFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                const CString &Payload, const CString &Session, const CString &Nonce, const CString &Signature,
-                const CString &Agent, const CString &Host, long int ReceiveWindow,
-                COnPQPollQueryExecutedEvent &&OnExecuted, COnPQPollQueryExceptionEvent &&OnException) {
-
-            CStringList SQL;
-
-            const auto &caPayload = Payload.IsEmpty() ? "null" : PQQuoteLiteral(Payload);
-
-            SQL.Add(CString()
-                .MaxFormatSize(256 + Method.Size() + Path.Size() + caPayload.Size() + Session.Size() + Nonce.Size() + Signature.Size() + Agent.Size())
-                .Format("SELECT * FROM daemon.signed_fetch(%s, %s, %s::json, %s, %s, %s, %s, %s, INTERVAL '%d milliseconds');",
-                                     PQQuoteLiteral(Method).c_str(),
-                                     PQQuoteLiteral(Path).c_str(),
-                                     caPayload.c_str(),
-                                     PQQuoteLiteral(Session).c_str(),
-                                     PQQuoteLiteral(Nonce).c_str(),
-                                     PQQuoteLiteral(Signature).c_str(),
-                                     PQQuoteLiteral(Agent).c_str(),
-                                     PQQuoteLiteral(Host).c_str(),
-                                     ReceiveWindow
-            ));
-
-            AConnection->Data().Values("method", Method);
-            AConnection->Data().Values("path", Path);
-            AConnection->Data().Values("authorized", "true");
-            AConnection->Data().Values("signature", "true");
-
-            try {
-                ExecSQL(SQL, AConnection, std::move(OnExecuted), std::move(OnException));
-            } catch (Delphi::Exception::Exception &E) {
-                AConnection->SendStockReply(CHTTPReply::service_unavailable);
-                Log()->Error(APP_LOG_ERR, 0, "%s", E.what());
-            }
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::DoFetch(CHTTPServerConnection *AConnection, const CString &Method, const CString &Path,
-                COnPQPollQueryExecutedEvent &&OnExecuted, COnPQPollQueryExceptionEvent &&OnException) {
-
-            auto pRequest = AConnection->Request();
-
-            const auto& caContentType = pRequest->Headers.Values(_T("Content-Type")).Lower();
-            const auto bContentJson = (caContentType.Find(_T("application/json")) != CString::npos);
-
-            CJSON Json;
-            if (!bContentJson) {
-                ContentToJson(pRequest, Json);
-            }
-
-            const auto& caPayload = bContentJson ? pRequest->Content : Json.ToString();
-            const auto& caSignature = pRequest->Headers.Values(_T("Signature"));
-
-            const auto& caAgent = GetUserAgent(AConnection);
-            const auto& caHost = GetRealIP(AConnection);
-
-            try {
-                if (caSignature.IsEmpty()) {
-                    CAuthorization Authorization;
-                    if (CheckAuthorization(AConnection, Authorization)) {
-                        AuthorizedFetch(AConnection, Authorization, Method, Path, caPayload, caAgent, caHost, std::move(OnExecuted), std::move(OnException));
+                            if (!callback.empty()) {
+                                DoCallBack(callback, object, name, path, caFileName);
+                            }
+                        }
                     }
-                } else {
-                    const auto& caSession = GetSession(pRequest);
-                    const auto& caNonce = pRequest->Headers.Values(_T("Nonce"));
-
-                    long int receiveWindow = 5000;
-                    const auto& caReceiveWindow = pRequest->Params[_T("receive_window")];
-                    if (!caReceiveWindow.IsEmpty())
-                        receiveWindow = StrToIntDef(caReceiveWindow.c_str(), receiveWindow);
-
-                    SignedFetch(AConnection, Method, Path, caPayload, caSession, caNonce, caSignature, caAgent, caHost, receiveWindow, std::move(OnExecuted), std::move(OnException));
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
                 }
-            } catch (Delphi::Exception::Exception &E) {
-                ReplyError(AConnection, CHTTPReply::bad_request, E.what());
+
+                DeleteHandler(pHandler);
+                UnloadQueue();
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                DeleteHandler(pHandler);
+                UnloadQueue();
+                DoError(E);
+            };
+
+            const auto &operation = AHandler->Payload()["operation"].AsString();
+            const auto &object = AHandler->Payload()["object"].AsString();
+            const auto &name = AHandler->Payload()["name"].AsString();
+            const auto &path = AHandler->Payload()["path"].AsString();
+
+            if (operation == "DELETE") {
+                const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
+
+                DeleteFile(caFileName);
+
+                DeleteHandler(AHandler);
+                UnloadQueue();
+            } else {
+                CStringList SQL;
+
+                api::authorize(SQL, AHandler->Session());
+                api::get_object_file(SQL, object, name, path);
+
+                try {
+                    ExecSQL(SQL, AHandler, OnExecuted, OnException);
+                    AHandler->Allow(false);
+                    IncProgress();
+                } catch (Delphi::Exception::Exception &E) {
+                    DeleteHandler(AHandler);
+                    DoError(E);
+                }
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoFile(CHTTPServerConnection *AConnection, const CString &Method, const CString &Id,
+        void CFileServer::DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Id,
                 const CString &Path, const CString &Name) {
 
-            auto OnExecuted = [](CPQPollQuery *APollQuery) {
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
-                auto pResult = APollQuery->Results(0);
-
-                if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                    QueryException(APollQuery, Delphi::Exception::EDBError("DBError: %s", pResult->GetErrorMessage()));
-                    return;
-                }
+                CPQueryResults pqResults;
 
                 auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
 
                 if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-
-                    auto pReply = pConnection->Reply();
-
-                    CString errorMessage;
-                    CHTTPReply::CStatusType status;
-
                     try {
-                        if (pResult->nTuples() == 1) {
-                            const CJSON Payload(pResult->GetValue(0, 0));
-                            status = ErrorCodeToStatus(CheckError(Payload, errorMessage));
+                        CApostolModule::QueryToResults(APollQuery, pqResults);
 
-                            if (status != CHTTPReply::ok) {
-                                ReplyError(pConnection, status, errorMessage);
-                                return;
-                            }
+                        const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
 
-                            const auto &caFile = Payload.Object();
+                        if (authorize["authorized"] != "t")
+                            throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
 
-                            const auto &name = caFile["name"].AsString();
-                            const auto &path = caFile["path"].AsString();
-                            const auto &date = caFile["loaded"].AsString();
-                            const auto &data = caFile["data"].IsNull() ? CString() : caFile["data"].AsString();
+                        auto pReply = pConnection->Reply();
 
-                            CString sFileExt;
-                            TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
-
-                            sFileExt = ExtractFileExt(szBuffer, name.c_str());
-
-                            auto sModified = StrWebTime(FileAge(date.c_str()), szBuffer, sizeof(szBuffer));
-                            if (sModified != nullptr) {
-                                pReply->AddHeader(_T("Last-Modified"), sModified);
-                            }
-
-                            if (data.IsEmpty()) {
-                                pReply->Content.Clear();
-                                pConnection->SendStockReply(CHTTPReply::no_content, true);
-                                return;
-                            }
-
-                            pReply->Content = base64_decode(squeeze(data));
-                            pConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
-
+                        if (pqResults[QUERY_INDEX_DATA].Count() == 0) {
+                            pConnection->SendStockReply(CHTTPReply::not_found, true);
                             return;
                         }
 
-                        pConnection->SendStockReply(CHTTPReply::not_found, true);
+                        const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
+
+                        const auto &object = caFile["object"];
+                        const auto &name = caFile["name"];
+                        const auto &path = caFile["path"];
+                        const auto &date = caFile["loaded"];
+                        const auto &data = caFile["data"].IsEmpty() ? CString() : caFile["data"];
+
+                        CString sFileExt;
+                        TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
+
+                        sFileExt = ExtractFileExt(szBuffer, name.c_str());
+
+                        if (data.IsEmpty()) {
+                            pReply->Content.Clear();
+                            pConnection->SendStockReply(CHTTPReply::no_content, true);
+                            return;
+                        }
+
+                        const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                        CApplication::MkDir(caFilePath);
+                        const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
+
+                        DeleteFile(caFileName);
+
+                        pReply->Content = base64_decode(squeeze(data));
+                        pReply->Content.SaveToFile(caFileName.c_str());
+
+                        pConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
                     } catch (Delphi::Exception::Exception &E) {
                         ReplyError(pConnection, CHTTPReply::bad_request, E.what());
                     } catch (std::exception &e) {
@@ -658,48 +500,91 @@ namespace Apostol {
                 }
             };
 
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                QueryException(APollQuery, E);
+            };
+
             CString sName(CHTTPServer::URLDecode(Name));
 
             if (path_separator(sName.back())) {
                 sName += APOSTOL_INDEX_FILE;
             }
 
-            auto pRequest = AConnection->Request();
+            const auto &caFilePath = m_Path + Id + (path_separator(Path.front()) ? Path : "/" + Path);
+            const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
 
-            pRequest->Params.Clear();
-            pRequest->Params.AddPair("id", Id);
-            pRequest->Params.AddPair("name", Name);
-            pRequest->Params.AddPair("path", Path);
+            if (FileExists(caFileName.c_str())) {
+                auto pReply = AConnection->Reply();
 
-            DoFetch(AConnection, "GET", "/api/v1/object/file/get", OnExecuted);
+                CString sFileExt;
+                TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
+
+                sFileExt = ExtractFileExt(szBuffer, sName.c_str());
+
+                auto sModified = StrWebTime(FileAge(caFileName.c_str()), szBuffer, sizeof(szBuffer));
+                if (sModified != nullptr) {
+                    pReply->AddHeader(_T("Last-Modified"), sModified);
+                }
+
+                pReply->Content.LoadFromFile(caFileName);
+                AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+            } else {
+                CStringList SQL;
+
+                api::authorize(SQL, Session);
+                api::get_object_file(SQL, Id, Name, Path);
+
+                try {
+                    ExecSQL(SQL, AConnection, OnExecuted, OnException);
+                } catch (Delphi::Exception::Exception &E) {
+                    Log()->Error(APP_LOG_EMERG, 0, E.what());
+                }
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-            ReplyError(pConnection, CHTTPReply::internal_server_error, E.what());
+            if (pConnection != nullptr) {
+                ReplyError(pConnection, CHTTPReply::internal_server_error, E.what());
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) {
+            DebugNotify(AConnection, ANotify);
+
+            if (CompareString(ANotify->relname, PG_LISTEN_NAME) == 0) {
+                for (int i = 0; i < m_Sessions.Count(); ++i) {
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                    new CFileHandler(this, m_Sessions[i], ANotify->extra, [this](auto &&Handler) { DoFile(Handler); });
+#else
+                    new CFileHandler(this, m_Sessions[i], ANotify->extra, std::bind(&CFileServer::DoFetch, this, _1));
+#endif
+                }
+
+                UnloadQueue();
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::DoPostgresQueryExecuted(CPQPollQuery *APollQuery) {
+            CPQResult *pResult;
 
-            auto pResult = APollQuery->Results(0);
-
-            if (pResult->ExecStatus() != PGRES_TUPLES_OK) {
-                QueryException(APollQuery, Delphi::Exception::EDBError("DBError: %s", pResult->GetErrorMessage()));
-                return;
-            }
-
-            auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-
-            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-                ReplyQuery(pConnection, pResult);
+            try {
+                for (int i = 0; i < APollQuery->Count(); i++) {
+                    pResult = APollQuery->Results(i);
+                    if (pResult->ExecStatus() != PGRES_TUPLES_OK)
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                }
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::DoPostgresQueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-            QueryException(APollQuery, E);
+            DoError(E);
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -720,7 +605,7 @@ namespace Apostol {
 
             SplitColumns(sPath, slRouts, '/');
 
-            sPath = "~/";
+            sPath = "/";
 
             if (slRouts.Count() < 2) {
                 AConnection->SendStockReply(CHTTPReply::not_found);
@@ -735,7 +620,15 @@ namespace Apostol {
                 sName << slRouts.Last();
             }
 
-            DoFile(AConnection, "GET", slRouts[1], sPath, sName);
+            CAuthorization Authorization;
+            if (!CheckAuthorization(AConnection, Authorization)) {
+                return;
+            }
+
+            auto decoded = jwt::decode(Authorization.Token);
+            const auto& Session = CString(decoded.get_subject());
+
+            DoGetFile(AConnection, Session, slRouts[1], sPath, sName);
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -751,20 +644,205 @@ namespace Apostol {
                 return;
             }
 
-            DoFetch(AConnection, "POST", sPath);
+            MethodNotAllowed(AConnection);
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::Heartbeat(CDateTime DateTime) {
-            if ((DateTime >= m_FixedDate)) {
-                m_FixedDate = DateTime + (CDateTime) 30 / MinsPerDay; // 30 min
+        void CFileServer::Authentication() {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+
+                CPQueryResults pqResults;
+                CStringList SQL;
+
+                try {
+                    CApostolModule::QueryToResults(APollQuery, pqResults);
+
+                    const auto &login = pqResults[0];
+                    const auto &sessions = pqResults[1];
+
+                    const auto &session = login.First()["session"];
+
+                    m_Sessions.Clear();
+                    for (int i = 0; i < sessions.Count(); ++i) {
+                        m_Sessions.Add(sessions[i]["get_sessions"]);
+                    }
+
+                    m_AuthDate = Now() + (CDateTime) 24 / HoursPerDay;
+
+                    SignOut(session);
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(E);
+            };
+
+            const auto &caProviders = Server().Providers();
+            const auto &caProvider = caProviders.DefaultValue();
+
+            const auto &clientId = caProvider.ClientId(SERVICE_APPLICATION_NAME);
+            const auto &clientSecret = caProvider.Secret(SERVICE_APPLICATION_NAME);
+
+            CStringList SQL;
+
+            api::login(SQL, clientId, clientSecret, m_Agent, m_Host);
+            api::get_sessions(SQL, API_BOT_USERNAME, m_Agent, m_Host);
+
+            try {
+                ExecSQL(SQL, nullptr, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
             }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::SignOut(const CString &Session) {
+            CStringList SQL;
+
+            api::signout(SQL, Session);
+
+            try {
+                ExecSQL(SQL);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::InitListen() {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                try {
+                    auto pResult = APollQuery->Results(0);
+
+                    if (pResult->ExecStatus() != PGRES_COMMAND_OK) {
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                    }
+
+                    APollQuery->Connection()->Listeners().Add(PG_LISTEN_NAME);
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                    APollQuery->Connection()->OnNotify([this](auto && APollQuery, auto && ANotify) { DoPostgresNotify(APollQuery, ANotify); });
+#else
+                    APollQuery->Connection()->OnNotify(std::bind(&CFileServer::DoPostgresNotify, this, _1, _2));
+#endif
+                } catch (Delphi::Exception::Exception &E) {
+                    DoError(E);
+                }
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                DoError(E);
+            };
+
+            CStringList SQL;
+
+            SQL.Add("LISTEN " PG_LISTEN_NAME ";");
+
+            try {
+                ExecSQL(SQL, nullptr, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::CheckListen() {
+            if (!PQClient(PG_CONFIG_NAME).CheckListen(PG_LISTEN_NAME))
+                InitListen();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DeleteHandler(CFileHandler *AHandler) {
+            delete AHandler;
+            DecProgress();
+            UnloadQueue();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CFileServer::AddToQueue(CFileHandler *AHandler) {
+            return m_Queue.AddToQueue(this, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::InsertToQueue(int Index, CFileHandler *AHandler) {
+            m_Queue.InsertToQueue(this, Index, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::RemoveFromQueue(CFileHandler *AHandler) {
+            m_Queue.RemoveFromQueue(this, AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::UnloadQueue() {
+            const auto index = m_Queue.IndexOf(this);
+            if (index != -1) {
+                const auto queue = m_Queue[index];
+                for (int i = 0; i < queue->Count(); ++i) {
+                    auto pHandler = (CFileHandler *) queue->Item(i);
+                    if (pHandler != nullptr) {
+                        pHandler->Handler();
+                        if (m_Progress >= m_MaxQueue)
+                            break;
+                    }
+                }
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CPQPollQuery *CFileServer::GetQuery(CPollConnection *AConnection) {
+            CPQPollQuery *pQuery = m_pModuleProcess->GetQuery(AConnection, PG_CONFIG_NAME);
+
+            if (Assigned(pQuery)) {
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+                pQuery->OnPollExecuted([this](auto && APollQuery) { DoPostgresQueryExecuted(APollQuery); });
+                pQuery->OnException([this](auto && APollQuery, auto && AException) { DoPostgresQueryException(APollQuery, AException); });
+#else
+                pQuery->OnPollExecuted(std::bind(&CApostolModule::DoPostgresQueryExecuted, this, _1));
+                pQuery->OnException(std::bind(&CApostolModule::DoPostgresQueryException, this, _1, _2));
+#endif
+            }
+
+            return pQuery;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::Initialization(CModuleProcess *AProcess) {
+            m_Path = Config()->IniFile().ReadString(SectionName().c_str(), "path", "files/");
+
+            if (!path_separator(m_Path.front())) {
+                m_Path = Config()->Prefix() + m_Path;
+            }
+
+            if (!path_separator(m_Path.back())) {
+                m_Path = m_Path + "/";
+            }
+
+            CApplication::MkDir(m_Path);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::Heartbeat(CDateTime Now) {
+            if ((Now >= m_CheckDate)) {
+                m_CheckDate = Now + (CDateTime) 1 / MinsPerDay; // 1 min
+                CheckListen();
+            }
+
+            if ((Now >= m_AuthDate)) {
+                m_AuthDate = Now + (CDateTime) 5 / SecsPerDay; // 5 sec
+                Authentication();
+            }
+
+            UnloadQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
 
         bool CFileServer::Enabled() {
             if (m_ModuleStatus == msUnknown)
-                m_ModuleStatus = Config()->IniFile().ReadBool(SectionName(), "enable", true) ? msEnabled : msDisabled;
+                m_ModuleStatus = Config()->IniFile().ReadBool(SectionName().c_str(), "enable", true) ? msEnabled : msDisabled;
             return m_ModuleStatus == msEnabled;
         }
         //--------------------------------------------------------------------------------------------------------------
