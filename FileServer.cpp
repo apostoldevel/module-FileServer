@@ -117,6 +117,8 @@ namespace Apostol {
             m_Agent = CString().Format("File Server (%s)", GApplication->Title().c_str());
             m_Host = CApostolModule::GetIPByHostName(CApostolModule::GetHostName());
 
+            m_Conf = PG_CONFIG_NAME;
+
             m_CheckDate = 0;
             m_AuthDate = 0;
             m_Progress = 0;
@@ -327,8 +329,34 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::DoError(const Delphi::Exception::Exception &E) {
-            m_AuthDate = 0;
             Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", E.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoCopy(const CString &Copy, const CString &File) {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                CPQResult *pResult;
+
+                for (int i = 0; i < APollQuery->Count(); i++) {
+                    pResult = APollQuery->Results(i);
+                    if (pResult->ExecStatus() != PGRES_COMMAND_OK)
+                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
+                }
+            };
+
+            CStringList SQL;
+
+            SQL.Add(CString().MaxFormatSize(256 + Copy.Size() + File.Size()).Format(Copy.c_str(), File.c_str()));
+
+            try {
+                m_Conf = "kernel";
+                ExecSQL(SQL, nullptr, OnExecuted);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(E);
+            }
+
+            m_Conf = PG_CONFIG_NAME;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -345,10 +373,13 @@ namespace Apostol {
                                      PQQuoteLiteral(File).c_str()));
 
             try {
+                m_Conf = "kernel";
                 ExecSQL(SQL);
             } catch (Delphi::Exception::Exception &E) {
                 DoError(E);
             }
+
+            m_Conf = PG_CONFIG_NAME;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -388,7 +419,15 @@ namespace Apostol {
                             decode.SaveToFile(caFileName.c_str());
 
                             if (!callback.empty()) {
-                                DoCallBack(callback, object, name, path, caFileName);
+                                const auto &tmp = CApplication::MkTempDir();
+                                CApplication::ChMod(tmp, 0755);
+
+                                const auto &tmp_file = path_separator(tmp.back()) ? tmp + name : tmp + "/" + name;
+
+                                decode.Position(0);
+                                decode.SaveToFile(tmp_file.c_str());
+
+                                DoCallBack(callback, object, name, path, tmp_file);
                             }
                         }
                     }
@@ -794,7 +833,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         CPQPollQuery *CFileServer::GetQuery(CPollConnection *AConnection) {
-            CPQPollQuery *pQuery = m_pModuleProcess->GetQuery(AConnection, PG_CONFIG_NAME);
+            CPQPollQuery *pQuery = m_pModuleProcess->GetQuery(AConnection, m_Conf);
 
             if (Assigned(pQuery)) {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)

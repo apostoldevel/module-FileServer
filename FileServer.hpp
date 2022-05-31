@@ -93,6 +93,7 @@ namespace Apostol {
 
             CStringList m_Sessions;
 
+            CString m_Conf;
             CString m_Path;
             CString m_Agent;
             CString m_Host;
@@ -132,6 +133,7 @@ namespace Apostol {
             void DoError(const Delphi::Exception::Exception &E);
 
             void DoFile(CFileHandler *AHandler);
+            void DoCopy(const CString &Copy, const CString &File);
             void DoCallBack( const CString &Callback, const CString &Object, const CString &Name, const CString &Path, const CString &File);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
