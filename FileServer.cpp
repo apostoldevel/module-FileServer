@@ -718,7 +718,7 @@ namespace Apostol {
                     m_AuthDate = Now() + (CDateTime) 23 / HoursPerDay;
 
                     if (!olSession.IsEmpty()) {
-                        SignOut(m_Session);
+                        SignOut(olSession);
                     }
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
