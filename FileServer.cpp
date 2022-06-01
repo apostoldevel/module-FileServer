@@ -715,7 +715,7 @@ namespace Apostol {
                         m_Sessions.Add(sessions[i]["get_sessions"]);
                     }
 
-                    m_AuthDate = Now() + (CDateTime) 23 / HoursPerDay;
+                    m_AuthDate = Now() + (CDateTime) 24 / HoursPerDay;
 
                     if (!olSession.IsEmpty()) {
                         SignOut(olSession);
