@@ -659,13 +659,19 @@ namespace Apostol {
                 sName << slRouts.Last();
             }
 
-            CAuthorization Authorization;
-            if (!CheckAuthorization(AConnection, Authorization)) {
-                return;
-            }
+            CString Session;
 
-            auto decoded = jwt::decode(Authorization.Token);
-            const auto& Session = CString(decoded.get_subject());
+            if (sPath == "/public/") {
+                Session = m_Session;
+            } else {
+                CAuthorization Authorization;
+                if (!CheckAuthorization(AConnection, Authorization)) {
+                    return;
+                }
+
+                auto decoded = jwt::decode(Authorization.Token);
+                Session = CString(decoded.get_subject());
+            }
 
             DoGetFile(AConnection, Session, slRouts[1], sPath, sName);
         }
@@ -700,16 +706,20 @@ namespace Apostol {
                     const auto &login = pqResults[0];
                     const auto &sessions = pqResults[1];
 
-                    const auto &session = login.First()["session"];
+                    const auto &olSession = m_Session;
+
+                    m_Session = login.First()["session"];
 
                     m_Sessions.Clear();
                     for (int i = 0; i < sessions.Count(); ++i) {
                         m_Sessions.Add(sessions[i]["get_sessions"]);
                     }
 
-                    m_AuthDate = Now() + (CDateTime) 24 / HoursPerDay;
+                    m_AuthDate = Now() + (CDateTime) 23 / HoursPerDay;
 
-                    SignOut(session);
+                    if (!olSession.IsEmpty()) {
+                        SignOut(m_Session);
+                    }
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
                 }

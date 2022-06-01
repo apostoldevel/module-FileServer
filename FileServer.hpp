@@ -91,6 +91,7 @@ namespace Apostol {
         class CFileServer: public CApostolModule {
         private:
 
+            CString m_Session;
             CStringList m_Sessions;
 
             CString m_Conf;
