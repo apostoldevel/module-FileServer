@@ -213,52 +213,51 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::VerifyToken(const CString &Token) {
-
-            const auto& GetSecret = [](const CProvider &Provider, const CString &Application) {
-                const auto &Secret = Provider.Secret(Application);
-                if (Secret.IsEmpty())
-                    throw ExceptionFrm("Not found secret for \"%s:%s\"", Provider.Name().c_str(), Application.c_str());
-                return Secret;
-            };
-
+        CString CFileServer::VerifyToken(const CString &Token) {
             auto decoded = jwt::decode(Token);
-            const auto& aud = CString(decoded.get_audience());
+
+            const auto &aud = CString(decoded.get_audience());
+            const auto &alg = CString(decoded.get_algorithm());
+            const auto &iss = CString(decoded.get_issuer());
+
+            const auto &Providers = Server().Providers();
 
             CString Application;
-
-            const auto& Providers = Server().Providers();
-
-            const auto Index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
-            if (Index == -1)
+            const auto index = OAuth2::Helper::ProviderByClientId(Providers, aud, Application);
+            if (index == -1)
                 throw COAuth2Error(_T("Not found provider by Client ID."));
 
-            const auto& Provider = Providers[Index].Value();
-
-            const auto& iss = CString(decoded.get_issuer());
+            const auto &Provider = Providers[index].Value();
+            const auto &Secret = OAuth2::Helper::GetSecret(Provider, Application);
 
             CStringList Issuers;
             Provider.GetIssuers(Application, Issuers);
             if (Issuers[iss].IsEmpty())
                 throw jwt::token_verification_exception("Token doesn't contain the required issuer.");
 
-            const auto& alg = decoded.get_algorithm();
-
-            const auto& caSecret = GetSecret(Provider, Application);
-
             if (alg == "HS256") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs256{caSecret});
+                        .allow_algorithm(jwt::algorithm::hs256{Secret});
                 verifier.verify(decoded);
             } else if (alg == "HS384") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs384{caSecret});
+                        .allow_algorithm(jwt::algorithm::hs384{Secret});
                 verifier.verify(decoded);
             } else if (alg == "HS512") {
                 auto verifier = jwt::verify()
-                        .allow_algorithm(jwt::algorithm::hs512{caSecret});
+                        .allow_algorithm(jwt::algorithm::hs512{Secret});
                 verifier.verify(decoded);
             }
+
+            return decoded.get_payload_claim("sub").as_string();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CString CFileServer::GetSession(CHTTPRequest *ARequest) {
+            const auto &headerSession = ARequest->Headers.Values(_T("Session"));
+            const auto &cookieSession = ARequest->Cookies.Values(_T("SID"));
+
+            return headerSession.IsEmpty() ? cookieSession : headerSession;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -268,19 +267,14 @@ namespace Apostol {
             const auto &caAuthorization = caHeaders.Values(_T("Authorization"));
 
             if (caAuthorization.IsEmpty()) {
+                const auto &caSession = GetSession(ARequest);
 
-                const auto &headerSession = caHeaders.Values(_T("Session"));
-                const auto &headerSecret = caHeaders.Values(_T("Secret"));
-
-                Authorization.Username = headerSession;
-                Authorization.Password = headerSecret;
-
-                if (Authorization.Username.IsEmpty() || Authorization.Password.IsEmpty())
+                if (caSession.Length() != 40)
                     return false;
 
                 Authorization.Schema = CAuthorization::asBasic;
                 Authorization.Type = CAuthorization::atSession;
-
+                Authorization.Username = caSession;
             } else {
                 Authorization << caAuthorization;
             }
@@ -289,20 +283,25 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        bool CFileServer::CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization) {
+        bool CFileServer::CheckAuthorization(CHTTPServerConnection *AConnection, CString &Session, CAuthorization &Authorization) {
 
             auto pRequest = AConnection->Request();
 
             try {
                 if (CheckAuthorizationData(pRequest, Authorization)) {
                     if (Authorization.Schema == CAuthorization::asBearer) {
-                        VerifyToken(Authorization.Token);
+                        Session = VerifyToken(Authorization.Token);
                         return true;
                     }
                 }
 
-                if (Authorization.Schema == CAuthorization::asBasic)
+                if (Authorization.Schema == CAuthorization::asBasic) {
+                    if (Authorization.Type == CAuthorization::atSession) {
+                        Session = Authorization.Username;
+                        return true;
+                    }
                     AConnection->Data().Values("Authorization", "Basic");
+                }
 
                 ReplyError(AConnection, CHTTPReply::unauthorized, "Unauthorized.");
             } catch (jwt::token_expired_exception &e) {
@@ -335,7 +334,7 @@ namespace Apostol {
 
         void CFileServer::DoCopy(const CString &Copy, const CString &File) {
 
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+            auto OnExecuted = [](CPQPollQuery *APollQuery) {
                 CPQResult *pResult;
 
                 for (int i = 0; i < APollQuery->Count(); i++) {
@@ -480,67 +479,100 @@ namespace Apostol {
         void CFileServer::DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Id,
                 const CString &Path, const CString &Name) {
 
-            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+            auto OnSuccess = [this](CHTTPServerConnection *AConnection, CPQPollQuery *APollQuery) {
 
                 CPQueryResults pqResults;
 
-                auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
+                try {
+                    CApostolModule::QueryToResults(APollQuery, pqResults);
 
-                if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-                    try {
-                        CApostolModule::QueryToResults(APollQuery, pqResults);
+                    const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
 
-                        const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
+                    if (authorize["authorized"] != "t")
+                        throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
 
-                        if (authorize["authorized"] != "t")
-                            throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
+                    auto pReply = AConnection->Reply();
 
-                        auto pReply = pConnection->Reply();
-
-                        if (pqResults[QUERY_INDEX_DATA].Count() == 0) {
-                            pConnection->SendStockReply(CHTTPReply::not_found, true);
-                            return;
-                        }
-
-                        const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
-
-                        const auto &object = caFile["object"];
-                        const auto &name = caFile["name"];
-                        const auto &path = caFile["path"];
-                        const auto &date = caFile["loaded"];
-                        const auto &data = caFile["data"].IsEmpty() ? CString() : caFile["data"];
-
-                        CString sFileExt;
-                        TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
-
-                        sFileExt = ExtractFileExt(szBuffer, name.c_str());
-
-                        if (data.IsEmpty()) {
-                            pReply->Content.Clear();
-                            pConnection->SendStockReply(CHTTPReply::no_content, true);
-                            return;
-                        }
-
-                        const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
-                        CApplication::MkDir(caFilePath);
-                        const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
-
-                        DeleteFile(caFileName);
-
-                        pReply->Content = base64_decode(squeeze(data));
-                        pReply->Content.SaveToFile(caFileName.c_str());
-
-                        pConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
-                    } catch (Delphi::Exception::Exception &E) {
-                        ReplyError(pConnection, CHTTPReply::bad_request, E.what());
-                    } catch (std::exception &e) {
-                        ReplyError(pConnection, CHTTPReply::internal_server_error, e.what());
+                    if (pqResults[QUERY_INDEX_DATA].Count() == 0) {
+                        AConnection->SendStockReply(CHTTPReply::not_found, true);
+                        return;
                     }
+
+                    const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
+
+                    const auto &object = caFile["object"];
+                    const auto &name = caFile["name"];
+                    const auto &path = caFile["path"];
+                    const auto &date = caFile["loaded"];
+                    const auto &data = caFile["data"].IsEmpty() ? CString() : caFile["data"];
+
+                    CString sFileExt;
+                    TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
+
+                    sFileExt = ExtractFileExt(szBuffer, name.c_str());
+
+                    if (data.IsEmpty()) {
+                        pReply->Content.Clear();
+                        AConnection->SendStockReply(CHTTPReply::no_content, true);
+                        return;
+                    }
+
+                    const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                    CApplication::MkDir(caFilePath);
+                    const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
+
+                    DeleteFile(caFileName);
+
+                    pReply->Content = base64_decode(squeeze(data));
+                    pReply->Content.SaveToFile(caFileName.c_str());
+
+                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                } catch (Delphi::Exception::Exception &E) {
+                    ReplyError(AConnection, CHTTPReply::not_found, E.what());
+                } catch (std::exception &e) {
+                    ReplyError(AConnection, CHTTPReply::bad_request, e.what());
                 }
             };
 
-            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                QueryException(APollQuery, E);
+            auto OnContinue = [](CHTTPServerConnection *AConnection, CPQPollQuery *APollQuery) {
+
+                CPQueryResults pqResults;
+
+                try {
+                    CApostolModule::QueryToResults(APollQuery, pqResults);
+
+                    const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
+
+                    if (authorize["authorized"] != "t")
+                        throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
+
+                    auto pReply = AConnection->Reply();
+
+                    const auto &name = AConnection->Data()["name"];
+                    const auto &filename = AConnection->Data()["filename"];
+
+                    CString sFileExt;
+                    TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
+
+                    sFileExt = ExtractFileExt(szBuffer, name.c_str());
+
+                    auto sModified = StrWebTime(FileAge(filename.c_str()), szBuffer, sizeof(szBuffer));
+                    if (sModified != nullptr) {
+                        pReply->AddHeader(_T("Last-Modified"), sModified);
+                    }
+
+                    pReply->Content.LoadFromFile(filename);
+
+                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                } catch (Delphi::Exception::Exception &E) {
+                    ReplyError(AConnection, CHTTPReply::not_found, E.what());
+                } catch (std::exception &e) {
+                    ReplyError(AConnection, CHTTPReply::bad_request, e.what());
+                }
+            };
+
+            auto OnFail = [](CHTTPServerConnection *AConnection, const Delphi::Exception::Exception &E) {
+                ReplyError(AConnection, CHTTPReply::internal_server_error, E.what());
             };
 
             CString sName(CHTTPServer::URLDecode(Name));
@@ -552,29 +584,26 @@ namespace Apostol {
             const auto &caFilePath = m_Path + Id + (path_separator(Path.front()) ? Path : "/" + Path);
             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
 
+            AConnection->Data().AddPair("name", sName);
+            AConnection->Data().AddPair("filepath", caFilePath);
+            AConnection->Data().AddPair("filename", caFileName);
+
+            CStringList SQL;
+
             if (FileExists(caFileName.c_str())) {
-                auto pReply = AConnection->Reply();
+                api::authorize(SQL, Session);
 
-                CString sFileExt;
-                TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
-
-                sFileExt = ExtractFileExt(szBuffer, sName.c_str());
-
-                auto sModified = StrWebTime(FileAge(caFileName.c_str()), szBuffer, sizeof(szBuffer));
-                if (sModified != nullptr) {
-                    pReply->AddHeader(_T("Last-Modified"), sModified);
+                try {
+                    ExecuteSQL(SQL, AConnection, OnContinue, OnFail);
+                } catch (Delphi::Exception::Exception &E) {
+                    Log()->Error(APP_LOG_EMERG, 0, E.what());
                 }
-
-                pReply->Content.LoadFromFile(caFileName);
-                AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
             } else {
-                CStringList SQL;
-
                 api::authorize(SQL, Session);
                 api::get_object_file(SQL, Id, Name, Path);
 
                 try {
-                    ExecSQL(SQL, AConnection, OnExecuted, OnException);
+                    ExecuteSQL(SQL, AConnection, OnSuccess, OnFail);
                 } catch (Delphi::Exception::Exception &E) {
                     Log()->Error(APP_LOG_EMERG, 0, E.what());
                 }
@@ -584,7 +613,7 @@ namespace Apostol {
 
         void CFileServer::QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
             auto pConnection = dynamic_cast<CHTTPServerConnection *> (APollQuery->Binding());
-            if (pConnection != nullptr) {
+            if (pConnection != nullptr && pConnection->Connected()) {
                 ReplyError(pConnection, CHTTPReply::internal_server_error, E.what());
             }
         }
@@ -665,12 +694,9 @@ namespace Apostol {
                 Session = m_Session;
             } else {
                 CAuthorization Authorization;
-                if (!CheckAuthorization(AConnection, Authorization)) {
+                if (!CheckAuthorization(AConnection, Session, Authorization)) {
                     return;
                 }
-
-                auto decoded = jwt::decode(Authorization.Token);
-                Session = CString(decoded.get_subject());
             }
 
             DoGetFile(AConnection, Session, slRouts[1], sPath, sName);

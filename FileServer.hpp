@@ -122,12 +122,14 @@ namespace Apostol {
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
+            static CString GetSession(CHTTPRequest *ARequest);
+
             static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
             static int CheckError(const CJSON &Json, CString &ErrorMessage);
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
             static void DeleteFile(const CString &FileName);
 
-            void VerifyToken(const CString &Token);
+            CString VerifyToken(const CString &Token);
 
         protected:
 
@@ -166,7 +168,7 @@ namespace Apostol {
             bool Enabled() override;
 
             bool CheckLocation(const CLocation &Location) override;
-            bool CheckAuthorization(CHTTPServerConnection *AConnection, CAuthorization &Authorization);
+            bool CheckAuthorization(CHTTPServerConnection *AConnection, CString &Session, CAuthorization &Authorization);
 
             void IncProgress() { m_Progress++; }
             void DecProgress() { m_Progress--; }
