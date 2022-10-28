@@ -65,11 +65,12 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CFileHandler::CFileHandler(CFileServer *AModule, const CString &Session, const CString &Data, COnFileHandlerEvent &&Handler):
+        CFileHandler::CFileHandler(CFileServer *AModule, const CString &Data, COnFileHandlerEvent &&Handler):
                 CPollConnection(AModule->ptrQueueManager()), m_Allow(true) {
+
             m_pModule = AModule;
-            m_Session = Session;
             m_Payload = Data;
+            m_Session = m_Payload["session"].AsString();
             m_Handler = Handler;
 
             AddToQueue();
@@ -359,17 +360,20 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoCallBack(const CString &Callback, const CString &Object, const CString &Name,
+        void CFileServer::DoCallBack(const CString &Session, const CString &Callback, const CString &Object, const CString &Name,
                 const CString &Path, const CString &File) {
+
             CStringList SQL;
 
+            api::authorize(SQL, Session);
+
             SQL.Add(CString().MaxFormatSize(256 + Callback.Size() + Object.Size() + Name.Size() + Path.Size() + File.Size())
-                                .Format("SELECT %s(%s, %s, %s, %s);",
-                                     Callback.c_str(),
-                                     PQQuoteLiteral(Object).c_str(),
-                                     PQQuoteLiteral(Name).c_str(),
-                                     PQQuoteLiteral(Path).c_str(),
-                                     PQQuoteLiteral(File).c_str()));
+                            .Format("SELECT %s(%s, %s, %s, %s);",
+                                    Callback.c_str(),
+                                    PQQuoteLiteral(Object).c_str(),
+                                    PQQuoteLiteral(Name).c_str(),
+                                    PQQuoteLiteral(Path).c_str(),
+                                    PQQuoteLiteral(File).c_str()));
 
             try {
                 m_Conf = "kernel";
@@ -426,7 +430,7 @@ namespace Apostol {
                                 decode.Position(0);
                                 decode.SaveToFile(tmp_file.c_str());
 
-                                DoCallBack(callback, object, name, path, tmp_file);
+                                DoCallBack(pHandler->Session(), callback, object, name, path, tmp_file);
                             }
                         }
                     }
@@ -623,14 +627,11 @@ namespace Apostol {
             DebugNotify(AConnection, ANotify);
 
             if (CompareString(ANotify->relname, PG_LISTEN_NAME) == 0) {
-                for (int i = 0; i < m_Sessions.Count(); ++i) {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-                    new CFileHandler(this, m_Sessions[i], ANotify->extra, [this](auto &&Handler) { DoFile(Handler); });
+                new CFileHandler(this, ANotify->extra, [this](auto &&Handler) { DoFile(Handler); });
 #else
-                    new CFileHandler(this, m_Sessions[i], ANotify->extra, std::bind(&CFileServer::DoFetch, this, _1));
+                new CFileHandler(this, ANotify->extra, std::bind(&CFileServer::DoFetch, this, _1));
 #endif
-                }
-
                 UnloadQueue();
             }
         }
@@ -729,23 +730,13 @@ namespace Apostol {
                 try {
                     CApostolModule::QueryToResults(APollQuery, pqResults);
 
-                    const auto &login = pqResults[0];
-                    const auto &sessions = pqResults[1];
+                    const auto &session = pqResults[0].First()["session"];
 
-                    const auto &olSession = m_Session;
-
-                    m_Session = login.First()["session"];
-
-                    m_Sessions.Clear();
-                    for (int i = 0; i < sessions.Count(); ++i) {
-                        m_Sessions.Add(sessions[i]["get_sessions"]);
-                    }
+                    m_Session = pqResults[1].First()["get_session"];
 
                     m_AuthDate = Now() + (CDateTime) 24 / HoursPerDay;
 
-                    if (!olSession.IsEmpty()) {
-                        SignOut(olSession);
-                    }
+                    SignOut(session);
                 } catch (Delphi::Exception::Exception &E) {
                     DoError(E);
                 }
@@ -764,7 +755,7 @@ namespace Apostol {
             CStringList SQL;
 
             api::login(SQL, clientId, clientSecret, m_Agent, m_Host);
-            api::get_sessions(SQL, API_BOT_USERNAME, m_Agent, m_Host);
+            api::get_session(SQL, API_BOT_USERNAME, m_Agent, m_Host);
 
             try {
                 ExecSQL(SQL, nullptr, OnExecuted, OnException);

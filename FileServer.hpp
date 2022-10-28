@@ -65,7 +65,7 @@ namespace Apostol {
 
         public:
 
-            CFileHandler(CFileServer *AModule, const CString &Session, const CString &Data, COnFileHandlerEvent && Handler);
+            CFileHandler(CFileServer *AModule, const CString &Data, COnFileHandlerEvent && Handler);
 
             ~CFileHandler() override;
 
@@ -92,7 +92,6 @@ namespace Apostol {
         private:
 
             CString m_Session;
-            CStringList m_Sessions;
 
             CString m_Conf;
             CString m_Path;
@@ -137,7 +136,7 @@ namespace Apostol {
 
             void DoFile(CFileHandler *AHandler);
             void DoCopy(const CString &Copy, const CString &File);
-            void DoCallBack( const CString &Callback, const CString &Object, const CString &Name, const CString &Path, const CString &File);
+            void DoCallBack(const CString &Session, const CString &Callback, const CString &Object, const CString &Name, const CString &Path, const CString &File);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
