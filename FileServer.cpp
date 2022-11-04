@@ -427,8 +427,16 @@ namespace Apostol {
 
                                 const auto &tmp_file = path_separator(tmp.back()) ? tmp + name : tmp + "/" + name;
 
-                                decode.Position(0);
-                                decode.SaveToFile(tmp_file.c_str());
+                                CFile In(caFileName.c_str(), O_RDONLY);
+                                CFile Out(tmp_file.c_str(), OF_CREATE);
+
+                                In.Open();
+                                Out.Open();
+
+                                CApplication::CopyFile(Out, In);
+
+                                Out.Close();
+                                In.Close();
 
                                 DoCallBack(pHandler->Session(), callback, object, name, path, tmp_file);
                             }
