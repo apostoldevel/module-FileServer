@@ -422,6 +422,8 @@ namespace Apostol {
                             decode.SaveToFile(caFileName.c_str());
 
                             if (!callback.empty()) {
+                                CApplication::ChMod(caFileName, 0755);
+
                                 const auto &tmp = CApplication::MkTempDir();
                                 CApplication::ChMod(tmp, 0755);
 
@@ -438,7 +440,7 @@ namespace Apostol {
                                 Out.Close();
                                 In.Close();
 
-                                DoCallBack(pHandler->Session(), callback, object, name, path, tmp_file);
+                                DoCallBack(pHandler->Session(), callback, object, name, path, FileExists(tmp_file.c_str()) ? tmp_file : caFileName);
                             }
                         }
                     }
