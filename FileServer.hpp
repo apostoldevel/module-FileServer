@@ -121,9 +121,9 @@ namespace Apostol {
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
-            static CString GetSession(CHTTPRequest *ARequest);
+            static CString GetSession(const CHTTPRequest &Request);
 
-            static bool CheckAuthorizationData(CHTTPRequest *ARequest, CAuthorization &Authorization);
+            static bool CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization);
             static int CheckError(const CJSON &Json, CString &ErrorMessage);
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
             static void DeleteFile(const CString &FileName);
