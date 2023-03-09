@@ -70,6 +70,7 @@ namespace Apostol {
 
             m_pModule = AModule;
             m_Payload = Data;
+            m_Id = m_Payload["id"].AsString();
             m_Session = m_Payload["session"].AsString();
             m_Handler = Handler;
 
@@ -405,14 +406,12 @@ namespace Apostol {
                     if (pqResults[QUERY_INDEX_DATA].Count() == 1) {
                         const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
-                        const auto &object = caFile["object"];
                         const auto &name = caFile["name"];
                         const auto &path = caFile["path"];
                         const auto &data = caFile["data"];
-                        const auto &callback = caFile["callback"];
 
                         if (!data.empty()) {
-                            const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                            const auto &caFilePath = m_Path + (path_separator(path.front()) ? path : "/" + path);
                             CApplication::MkDir(caFilePath);
                             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
@@ -421,27 +420,27 @@ namespace Apostol {
                             auto decode = base64_decode(squeeze(data));
                             decode.SaveToFile(caFileName.c_str());
 
-                            if (!callback.empty()) {
-                                CApplication::ChMod(caFileName, 0755);
-
-                                const auto &tmp = CApplication::MkTempDir();
-                                CApplication::ChMod(tmp, 0755);
-
-                                const auto &tmp_file = path_separator(tmp.back()) ? tmp + name : tmp + "/" + name;
-
-                                CFile In(caFileName.c_str(), O_RDONLY);
-                                CFile Out(tmp_file.c_str(), OF_CREATE);
-
-                                In.Open();
-                                Out.Open();
-
-                                CApplication::CopyFile(Out, In);
-
-                                Out.Close();
-                                In.Close();
-
-                                DoCallBack(pHandler->Session(), callback, object, name, path, FileExists(tmp_file.c_str()) ? tmp_file : caFileName);
-                            }
+//                            if (!callback.empty()) {
+//                                CApplication::ChMod(caFileName, 0755);
+//
+//                                const auto &tmp = CApplication::MkTempDir();
+//                                CApplication::ChMod(tmp, 0755);
+//
+//                                const auto &tmp_file = path_separator(tmp.back()) ? tmp + name : tmp + "/" + name;
+//
+//                                CFile In(caFileName.c_str(), O_RDONLY);
+//                                CFile Out(tmp_file.c_str(), OF_CREATE);
+//
+//                                In.Open();
+//                                Out.Open();
+//
+//                                CApplication::CopyFile(Out, In);
+//
+//                                Out.Close();
+//                                In.Close();
+//
+//                                DoCallBack(pHandler->Session(), callback, object, name, path, FileExists(tmp_file.c_str()) ? tmp_file : caFileName);
+//                            }
                         }
                     }
                 } catch (Delphi::Exception::Exception &E) {
@@ -460,12 +459,11 @@ namespace Apostol {
             };
 
             const auto &operation = AHandler->Payload()["operation"].AsString();
-            const auto &object = AHandler->Payload()["object"].AsString();
             const auto &name = AHandler->Payload()["name"].AsString();
             const auto &path = AHandler->Payload()["path"].AsString();
 
             if (operation == "DELETE") {
-                const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
+                const auto &caFilePath = m_Path + (path_separator(path.front()) ? path : "/" + path);
                 const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                 DeleteFile(caFileName);
@@ -476,7 +474,7 @@ namespace Apostol {
                 CStringList SQL;
 
                 api::authorize(SQL, AHandler->Session());
-                api::get_object_file(SQL, object, name, path);
+                api::get_file(SQL, AHandler->Id());
 
                 try {
                     ExecSQL(SQL, AHandler, OnExecuted, OnException);
@@ -490,7 +488,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Id,
+        void CFileServer::DoGetFile(CHTTPServerConnection *AConnection, const CString &Session,
                 const CString &Path, const CString &Name) {
 
             auto OnSuccess = [this](CHTTPServerConnection *AConnection, CPQPollQuery *APollQuery) {
@@ -514,10 +512,9 @@ namespace Apostol {
 
                     const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
-                    const auto &object = caFile["object"];
                     const auto &name = caFile["name"];
                     const auto &path = caFile["path"];
-                    const auto &date = caFile["loaded"];
+                    const auto &date = caFile["date"];
                     const auto &data = caFile["data"].IsEmpty() ? CString() : caFile["data"];
 
                     CString sFileExt;
@@ -531,8 +528,8 @@ namespace Apostol {
                         return;
                     }
 
-                    const auto &caFilePath = m_Path + object + (path_separator(path.front()) ? path : "/" + path);
-                    CApplication::MkDir(caFilePath);
+                    const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
+                    ForceDirectories(caFilePath.c_str(), 0700);
                     const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                     DeleteFile(caFileName);
@@ -595,7 +592,7 @@ namespace Apostol {
                 sName += APOSTOL_INDEX_FILE;
             }
 
-            const auto &caFilePath = m_Path + Id + (path_separator(Path.front()) ? Path : "/" + Path);
+            const auto &caFilePath = m_Path + (path_separator(Path.front()) ? Path.SubString(1) : Path);
             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
 
             AConnection->Data().AddPair("name", sName);
@@ -614,7 +611,7 @@ namespace Apostol {
                 }
             } else {
                 api::authorize(SQL, Session);
-                api::get_object_file(SQL, Id, Name, Path);
+                api::get_file(SQL, Name, Path);
 
                 try {
                     ExecuteSQL(SQL, AConnection, OnSuccess, OnFail);
@@ -682,22 +679,18 @@ namespace Apostol {
             CStringList slRouts;
             CString sName;
 
+            if (path_separator(sPath.back())) {
+                sPath += APOSTOL_INDEX_FILE;
+            }
+
             SplitColumns(sPath, slRouts, '/');
 
             sPath = "/";
-
-            if (slRouts.Count() < 2) {
-                AConnection->SendStockReply(CHTTPReply::not_found);
-                return;
-            } if (slRouts.Count() == 2) {
-                sName << APOSTOL_INDEX_FILE;
-            } else {
-                for (int i = 2; i < slRouts.Count() - 1; ++i) {
-                    sPath << slRouts[i];
-                    sPath << "/";
-                }
-                sName << slRouts.Last();
+            for (int i = 1; i < slRouts.Count() - 1; ++i) {
+                sPath << slRouts[i];
+                sPath << "/";
             }
+            sName << slRouts.Last();
 
             CString Session;
 
@@ -710,7 +703,7 @@ namespace Apostol {
                 }
             }
 
-            DoGetFile(AConnection, Session, slRouts[1], sPath, sName);
+            DoGetFile(AConnection, Session, sPath, sName);
         }
         //--------------------------------------------------------------------------------------------------------------
 

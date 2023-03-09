@@ -48,6 +48,7 @@ namespace Apostol {
 
             CFileServer *m_pModule;
 
+            CString m_Id;
             CString m_Session;
 
             bool m_Allow;
@@ -69,6 +70,7 @@ namespace Apostol {
 
             ~CFileHandler() override;
 
+            const CString &Id() const { return m_Id; }
             const CString &Session() const { return m_Session; }
 
             const CJSON &Payload() const { return m_Payload; }
@@ -141,7 +143,7 @@ namespace Apostol {
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
 
-            void DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Id, const CString &Path = "/", const CString &Name = CString());
+            void DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Path, const CString &Name);
 
             void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
 
