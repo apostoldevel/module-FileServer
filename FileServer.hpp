@@ -2,7 +2,7 @@
 
 Program name:
 
-  Apostol Web Service
+  Apostol CRM
 
 Module Name:
 
@@ -31,56 +31,28 @@ namespace Apostol {
 
     namespace Module {
 
-        class CFileServer;
-        class CFileHandler;
-
         //--------------------------------------------------------------------------------------------------------------
 
         //-- CFileHandler ----------------------------------------------------------------------------------------------
 
         //--------------------------------------------------------------------------------------------------------------
 
-        typedef std::function<void (CFileHandler *Handler)> COnFileHandlerEvent;
-        //--------------------------------------------------------------------------------------------------------------
-
-        class CFileHandler: public CPollConnection {
+        class CFileHandler: public CQueueHandler {
         private:
 
-            CFileServer *m_pModule;
-
-            CString m_Id;
             CString m_Session;
-
-            bool m_Allow;
+            CString m_FileId;
 
             CJSON m_Payload;
 
-            COnFileHandlerEvent m_Handler;
-
-            int AddToQueue();
-            void RemoveFromQueue();
-
-        protected:
-
-            void SetAllow(bool Value) { m_Allow = Value; }
-
         public:
 
-            CFileHandler(CFileServer *AModule, const CString &Data, COnFileHandlerEvent && Handler);
+            CFileHandler(CQueueCollection *ACollection, const CString &Data, COnQueueHandlerEvent && Handler);
 
-            ~CFileHandler() override;
-
-            const CString &Id() const { return m_Id; }
             const CString &Session() const { return m_Session; }
+            const CString &FileId() const { return m_FileId; }
 
             const CJSON &Payload() const { return m_Payload; }
-
-            bool Allow() const { return m_Allow; };
-            void Allow(bool Value) { SetAllow(Value); };
-
-            bool Handler();
-
-            void Close() override;
 
         };
 
@@ -90,7 +62,7 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        class CFileServer: public CApostolModule {
+        class CFileServer: public CQueueCollection, public CApostolModule {
         private:
 
             CString m_Session;
@@ -100,26 +72,16 @@ namespace Apostol {
             CString m_Agent;
             CString m_Host;
 
-            CQueue m_Queue;
-            CQueueManager m_QueueManager;
-
             CDateTime m_CheckDate;
             CDateTime m_AuthDate;
 
-            size_t m_Progress;
-            size_t m_MaxQueue;
+            void InitMethods() override;
 
             void InitListen();
             void CheckListen();
 
             void Authentication();
             void SignOut(const CString &Session);
-
-            void UnloadQueue();
-
-            void InitMethods() override;
-
-            void DeleteHandler(CFileHandler *AHandler);
 
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
@@ -136,9 +98,7 @@ namespace Apostol {
 
             void DoError(const Delphi::Exception::Exception &E);
 
-            void DoFile(CFileHandler *AHandler);
-            void DoCopy(const CString &Copy, const CString &File);
-            void DoCallBack(const CString &Session, const CString &Callback, const CString &Object, const CString &Name, const CString &Path, const CString &File);
+            void DoFile(CQueueHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
@@ -166,25 +126,12 @@ namespace Apostol {
 
             void Heartbeat(CDateTime Now) override;
 
+            void UnloadQueue() override;
+
             bool Enabled() override;
 
             bool CheckLocation(const CLocation &Location) override;
             bool CheckAuthorization(CHTTPServerConnection *AConnection, CString &Session, CAuthorization &Authorization);
-
-            void IncProgress() { m_Progress++; }
-            void DecProgress() { m_Progress--; }
-
-            int AddToQueue(CFileHandler *AHandler);
-            void InsertToQueue(int Index, CFileHandler *AHandler);
-            void RemoveFromQueue(CFileHandler *AHandler);
-
-            CQueue &Queue() { return m_Queue; }
-            const CQueue &Queue() const { return m_Queue; }
-
-            CPollManager *ptrQueueManager() { return &m_QueueManager; }
-
-            CPollManager &QueueManager() { return m_QueueManager; }
-            const CPollManager &QueueManager() const { return m_QueueManager; }
 
         };
     }

@@ -2,7 +2,7 @@
 
 Program name:
 
-  Apostol Web Service
+  Apostol CRM
 
 Module Name:
 
@@ -65,46 +65,13 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CFileHandler::CFileHandler(CFileServer *AModule, const CString &Data, COnFileHandlerEvent &&Handler):
-                CPollConnection(AModule->ptrQueueManager()), m_Allow(true) {
+        CFileHandler::CFileHandler(CQueueCollection *ACollection, const CString &Data, COnQueueHandlerEvent && Handler):
+                CQueueHandler(ACollection, static_cast<COnQueueHandlerEvent &&> (Handler)) {
 
-            m_pModule = AModule;
             m_Payload = Data;
-            m_Id = m_Payload["id"].AsString();
+
             m_Session = m_Payload["session"].AsString();
-            m_Handler = Handler;
-
-            AddToQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        CFileHandler::~CFileHandler() {
-            RemoveFromQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileHandler::Close() {
-            m_Allow = false;
-            RemoveFromQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        int CFileHandler::AddToQueue() {
-            return m_pModule->AddToQueue(this);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileHandler::RemoveFromQueue() {
-            m_pModule->RemoveFromQueue(this);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        bool CFileHandler::Handler() {
-            if (m_Allow && m_Handler) {
-                m_Handler(this);
-                return true;
-            }
-            return false;
+            m_FileId = m_Payload["id"].AsString();
         }
 
         //--------------------------------------------------------------------------------------------------------------
@@ -113,7 +80,9 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
-        CFileServer::CFileServer(CModuleProcess *AProcess) : CApostolModule(AProcess, "file server", "module/FileServer") {
+        CFileServer::CFileServer(CModuleProcess *AProcess): CQueueCollection(Config()->PostgresPollMin()),
+                CApostolModule(AProcess, "file server", "module/FileServer") {
+
             m_Headers.Add("Authorization");
 
             m_Agent = CString().Format("File Server (%s)", GApplication->Title().c_str());
@@ -123,8 +92,6 @@ namespace Apostol {
 
             m_CheckDate = 0;
             m_AuthDate = 0;
-            m_Progress = 0;
-            m_MaxQueue = Config()->PostgresPollMin();
 
             CFileServer::InitMethods();
         }
@@ -334,60 +301,7 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoCopy(const CString &Copy, const CString &File) {
-
-            auto OnExecuted = [](CPQPollQuery *APollQuery) {
-                CPQResult *pResult;
-
-                for (int i = 0; i < APollQuery->Count(); i++) {
-                    pResult = APollQuery->Results(i);
-                    if (pResult->ExecStatus() != PGRES_COMMAND_OK)
-                        throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
-                }
-            };
-
-            CStringList SQL;
-
-            SQL.Add(CString().MaxFormatSize(256 + Copy.Size() + File.Size()).Format(Copy.c_str(), File.c_str()));
-
-            try {
-                m_Conf = "kernel";
-                ExecSQL(SQL, nullptr, OnExecuted);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(E);
-            }
-
-            m_Conf = PG_CONFIG_NAME;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::DoCallBack(const CString &Session, const CString &Callback, const CString &Object, const CString &Name,
-                const CString &Path, const CString &File) {
-
-            CStringList SQL;
-
-            api::authorize(SQL, Session);
-
-            SQL.Add(CString().MaxFormatSize(256 + Callback.Size() + Object.Size() + Name.Size() + Path.Size() + File.Size())
-                            .Format("SELECT %s(%s, %s, %s, %s);",
-                                    Callback.c_str(),
-                                    PQQuoteLiteral(Object).c_str(),
-                                    PQQuoteLiteral(Name).c_str(),
-                                    PQQuoteLiteral(Path).c_str(),
-                                    PQQuoteLiteral(File).c_str()));
-
-            try {
-                m_Conf = "kernel";
-                ExecSQL(SQL);
-            } catch (Delphi::Exception::Exception &E) {
-                DoError(E);
-            }
-
-            m_Conf = PG_CONFIG_NAME;
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::DoFile(CFileHandler *AHandler) {
+        void CFileServer::DoFile(CQueueHandler *AHandler) {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
@@ -419,28 +333,6 @@ namespace Apostol {
 
                             auto decode = base64_decode(squeeze(data));
                             decode.SaveToFile(caFileName.c_str());
-
-//                            if (!callback.empty()) {
-//                                CApplication::ChMod(caFileName, 0755);
-//
-//                                const auto &tmp = CApplication::MkTempDir();
-//                                CApplication::ChMod(tmp, 0755);
-//
-//                                const auto &tmp_file = path_separator(tmp.back()) ? tmp + name : tmp + "/" + name;
-//
-//                                CFile In(caFileName.c_str(), O_RDONLY);
-//                                CFile Out(tmp_file.c_str(), OF_CREATE);
-//
-//                                In.Open();
-//                                Out.Open();
-//
-//                                CApplication::CopyFile(Out, In);
-//
-//                                Out.Close();
-//                                In.Close();
-//
-//                                DoCallBack(pHandler->Session(), callback, object, name, path, FileExists(tmp_file.c_str()) ? tmp_file : caFileName);
-//                            }
                         }
                     }
                 } catch (Delphi::Exception::Exception &E) {
@@ -458,9 +350,11 @@ namespace Apostol {
                 DoError(E);
             };
 
-            const auto &operation = AHandler->Payload()["operation"].AsString();
-            const auto &name = AHandler->Payload()["name"].AsString();
-            const auto &path = AHandler->Payload()["path"].AsString();
+            auto pHandler = dynamic_cast<CFileHandler *> (AHandler);
+
+            const auto &operation = pHandler->Payload()["operation"].AsString();
+            const auto &name = pHandler->Payload()["name"].AsString();
+            const auto &path = pHandler->Payload()["path"].AsString();
 
             if (operation == "DELETE") {
                 const auto &caFilePath = m_Path + (path_separator(path.front()) ? path : "/" + path);
@@ -473,8 +367,8 @@ namespace Apostol {
             } else {
                 CStringList SQL;
 
-                api::authorize(SQL, AHandler->Session());
-                api::get_file(SQL, AHandler->Id());
+                api::authorize(SQL, pHandler->Session());
+                api::get_file(SQL, pHandler->FileId());
 
                 try {
                     ExecSQL(SQL, AHandler, OnExecuted, OnException);
@@ -821,28 +715,6 @@ namespace Apostol {
         void CFileServer::CheckListen() {
             if (!PQClient(PG_CONFIG_NAME).CheckListen(PG_LISTEN_NAME))
                 InitListen();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::DeleteHandler(CFileHandler *AHandler) {
-            delete AHandler;
-            DecProgress();
-            UnloadQueue();
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        int CFileServer::AddToQueue(CFileHandler *AHandler) {
-            return m_Queue.AddToQueue(this, AHandler);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::InsertToQueue(int Index, CFileHandler *AHandler) {
-            m_Queue.InsertToQueue(this, Index, AHandler);
-        }
-        //--------------------------------------------------------------------------------------------------------------
-
-        void CFileServer::RemoveFromQueue(CFileHandler *AHandler) {
-            m_Queue.RemoveFromQueue(this, AHandler);
         }
         //--------------------------------------------------------------------------------------------------------------
 
