@@ -531,7 +531,7 @@ namespace Apostol {
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
                 new CFileHandler(this, ANotify->extra, [this](auto &&Handler) { DoFile(Handler); });
 #else
-                new CFileHandler(this, ANotify->extra, std::bind(&CFileServer::DoFetch, this, _1));
+                new CFileHandler(this, ANotify->extra, std::bind(&CFileServer::DoFile, this, _1));
 #endif
                 UnloadQueue();
             }
@@ -742,8 +742,8 @@ namespace Apostol {
                 pQuery->OnPollExecuted([this](auto && APollQuery) { DoPostgresQueryExecuted(APollQuery); });
                 pQuery->OnException([this](auto && APollQuery, auto && AException) { DoPostgresQueryException(APollQuery, AException); });
 #else
-                pQuery->OnPollExecuted(std::bind(&CApostolModule::DoPostgresQueryExecuted, this, _1));
-                pQuery->OnException(std::bind(&CApostolModule::DoPostgresQueryException, this, _1, _2));
+                pQuery->OnPollExecuted(std::bind(&CFileServer::DoPostgresQueryExecuted, this, _1));
+                pQuery->OnException(std::bind(&CFileServer::DoPostgresQueryException, this, _1, _2));
 #endif
             }
 
