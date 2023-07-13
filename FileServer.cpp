@@ -431,7 +431,15 @@ namespace Apostol {
                     Reply.Content = base64_decode(squeeze(data));
                     Reply.Content.SaveToFile(caFileName.c_str());
 
-                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
+                    AConnection->SendFileReply(caFileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+#else
+                    if (AConnection->IOHandler()->UsedSSL()) {
+                        AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                    } else {
+                        AConnection->SendFileReply(caFileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+                    }
+#endif
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
@@ -466,9 +474,16 @@ namespace Apostol {
                         Reply.AddHeader(_T("Last-Modified"), sModified);
                     }
 
-                    Reply.Content.LoadFromFile(filename);
-
-                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
+                    AConnection->SendFileReply(filename.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+#else
+                    if (AConnection->IOHandler()->UsedSSL()) {
+                        Reply.Content.LoadFromFile(filename);
+                        AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                    } else {
+                        AConnection->SendFileReply(filename.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+                    }
+#endif
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
