@@ -325,7 +325,7 @@ namespace Apostol {
                         const auto &data = caFile["data"];
 
                         if (!data.empty()) {
-                            const auto &caFilePath = m_Path + (path_separator(path.front()) ? path : "/" + path);
+                            const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
                             CApplication::MkDir(caFilePath);
                             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
@@ -357,7 +357,7 @@ namespace Apostol {
             const auto &path = pHandler->Payload()["path"].AsString();
 
             if (operation == "DELETE") {
-                const auto &caFilePath = m_Path + (path_separator(path.front()) ? path : "/" + path);
+                const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
                 const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                 DeleteFile(caFileName);
@@ -588,7 +588,7 @@ namespace Apostol {
 
             CString Session;
 
-            if (sPath == "/public/") {
+            if (sPath.SubString(0, 8) == "/public/") {
                 Session = m_Session;
             } else {
                 CAuthorization Authorization;
@@ -758,8 +758,8 @@ namespace Apostol {
                 m_Path = Config()->Prefix() + m_Path;
             }
 
-            if (path_separator(m_Path.back())) {
-                m_Path.SetLength(m_Path.Length() - 1);
+            if (!path_separator(m_Path.back())) {
+                m_Path = m_Path + "/";
             }
 
             CApplication::MkDir(m_Path);
