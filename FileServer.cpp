@@ -326,7 +326,7 @@ namespace Apostol {
 
                         if (!data.empty()) {
                             const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                            CApplication::MkDir(caFilePath);
+                            ForceDirectories(caFilePath.c_str(), 0777);
                             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                             DeleteFile(caFileName);
@@ -762,8 +762,7 @@ namespace Apostol {
                 m_Path = m_Path + "/";
             }
 
-            CApplication::MkDir(m_Path);
-            CApplication::ChMod(m_Path, 0777);
+            ForceDirectories(m_Path.c_str(), 0777);
         }
         //--------------------------------------------------------------------------------------------------------------
 
