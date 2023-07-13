@@ -758,8 +758,8 @@ namespace Apostol {
                 m_Path = Config()->Prefix() + m_Path;
             }
 
-            if (!path_separator(m_Path.back())) {
-                m_Path = m_Path + "/";
+            if (path_separator(m_Path.back())) {
+                m_Path.SetLength(m_Path.Length() - 1);
             }
 
             CApplication::MkDir(m_Path);
