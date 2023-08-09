@@ -31,6 +31,34 @@ namespace Apostol {
 
     namespace Module {
 
+        class CFileServer;
+        class CFileServerThread;
+        class CFileServerThreadMgr;
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CCurlFileServer -------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CCurlFileServer: public CCurlApi {
+        private:
+
+            mutable CStringList m_Into;
+
+        protected:
+
+            void CurlInfo() const override;
+
+        public:
+
+            CCurlFileServer();
+            ~CCurlFileServer() override = default;
+
+            int GetResponseCode() const;
+
+        };
+
         //--------------------------------------------------------------------------------------------------------------
 
         //-- CFileHandler ----------------------------------------------------------------------------------------------
@@ -45,6 +73,12 @@ namespace Apostol {
 
             CJSON m_Payload;
 
+            CLocation m_URI;
+            CString m_FileName;
+
+            CFileServerThread *m_pThread;
+            CHTTPServerConnection *m_pConnection;
+
         public:
 
             CFileHandler(CQueueCollection *ACollection, const CString &Data, COnQueueHandlerEvent && Handler);
@@ -53,6 +87,113 @@ namespace Apostol {
             const CString &FileId() const { return m_FileId; }
 
             const CJSON &Payload() const { return m_Payload; }
+
+            CLocation &URI() { return m_URI; }
+            const CLocation &URI() const { return m_URI; }
+
+            CString &FileName() { return m_FileName; }
+            const CString &FileName() const { return m_FileName; }
+
+            CFileServerThread *Thread() const { return m_pThread; };
+            void SetThread(CFileServerThread *AThread) { m_pThread = AThread; };
+
+            CHTTPServerConnection *Connection() const { return m_pConnection; };
+            void SetConnection(CHTTPServerConnection *AConnection) { m_pConnection = AConnection; };
+
+        };
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServerThread -----------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CFileServerThread: public CThread, public CGlobalComponent {
+        private:
+
+            CFileServer *m_pFileServer;
+
+        protected:
+
+            CFileHandler *m_pHandler;
+            CFileServerThreadMgr *m_pThreadMgr;
+
+        public:
+
+            explicit CFileServerThread(CFileServer *AFileServer, CFileHandler *AHandler, CFileServerThreadMgr *AThreadMgr);
+
+            ~CFileServerThread() override;
+
+            void Execute() override;
+
+            void TerminateAndWaitFor();
+
+            CFileHandler *Handler() { return m_pHandler; };
+            void Handler(CFileHandler *Value) { m_pHandler = Value; };
+
+        };
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServerThreadMgr --------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CFileServerThreadMgr {
+        protected:
+
+            CThreadList m_ActiveThreads;
+            CThreadPriority m_ThreadPriority;
+
+        public:
+
+            CFileServerThreadMgr();
+
+            virtual ~CFileServerThreadMgr();
+
+            virtual CFileServerThread *GetThread(CFileServer *AFileServer, CFileHandler *AHandler);
+
+            virtual void ReleaseThread(CFileServerThread *AThread) abstract;
+
+            void TerminateThreads();
+
+            CThreadList &ActiveThreads() { return m_ActiveThreads; }
+            const CThreadList &ActiveThreads() const { return m_ActiveThreads; }
+
+            CThreadPriority ThreadPriority() const { return m_ThreadPriority; }
+            void ThreadPriority(CThreadPriority Value) { m_ThreadPriority = Value; }
+
+        }; // CFileServerThreadMgr
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServerThreadMgrDefault -------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        class CFileServerThreadMgrDefault : public CFileServerThreadMgr {
+            typedef CFileServerThreadMgr inherited;
+
+        public:
+
+            ~CFileServerThreadMgrDefault() override {
+                TerminateThreads();
+            };
+
+            CFileServerThread *GetThread(CFileServer *AFileServer, CFileHandler *AHandler) override {
+                return inherited::GetThread(AFileServer, AHandler);
+            };
+
+            void ReleaseThread(CFileServerThread *AThread) override {
+                if (!IsCurrentThread(AThread)) {
+                    AThread->FreeOnTerminate(false);
+                    AThread->TerminateAndWaitFor();
+                    FreeAndNil(AThread);
+                } else {
+                    AThread->FreeOnTerminate(true);
+                    AThread->Terminate();
+                }
+            };
 
         };
 
@@ -75,6 +216,8 @@ namespace Apostol {
             CDateTime m_CheckDate;
             CDateTime m_AuthDate;
 
+            CFileServerThreadMgrDefault m_ThreadMgr;
+
             void InitMethods() override;
 
             void InitListen();
@@ -83,6 +226,8 @@ namespace Apostol {
             void Authentication();
             void SignOut(const CString &Session);
 
+            CFileServerThread *GetThread(CFileHandler *AHandler);
+
             static void QueryException(CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E);
 
             static CString GetSession(const CHTTPRequest &Request);
@@ -90,15 +235,19 @@ namespace Apostol {
             static bool CheckAuthorizationData(const CHTTPRequest &Request, CAuthorization &Authorization);
             static int CheckError(const CJSON &Json, CString &ErrorMessage);
             static CHTTPReply::CStatusType ErrorCodeToStatus(int ErrorCode);
+
             static void DeleteFile(const CString &FileName);
+            static void SendFile(CHTTPServerConnection *AConnection, const CString &FileName);
 
             CString VerifyToken(const CString &Token);
 
         protected:
 
             void DoError(const Delphi::Exception::Exception &E);
+            void DoFail(CQueueHandler *AHandler, const CString &Message);
 
             void DoFile(CQueueHandler *AHandler);
+            void DoLink(CQueueHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
@@ -132,6 +281,8 @@ namespace Apostol {
 
             bool CheckLocation(const CLocation &Location) override;
             bool CheckAuthorization(CHTTPServerConnection *AConnection, CString &Session, CAuthorization &Authorization);
+
+            void CURL(CFileHandler *AHandler);
 
         };
     }

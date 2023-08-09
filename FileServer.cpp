@@ -61,6 +61,116 @@ namespace Apostol {
 
         //--------------------------------------------------------------------------------------------------------------
 
+        //-- CCurlFileServer -------------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        CCurlFileServer::CCurlFileServer(): CCurlApi() {
+
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CCurlFileServer::CurlInfo() const {
+            char *url = nullptr;
+
+            TCHAR szString[_INT_T_LEN + 1] = {0};
+
+            long response_code;
+
+            curl_easy_getinfo(m_curl, CURLINFO_RESPONSE_CODE, &response_code);
+            curl_easy_getinfo(m_curl, CURLINFO_EFFECTIVE_URL, &url);
+
+            m_Into.Clear();
+            m_Into.AddPair("CURLINFO_RESPONSE_CODE", IntToStr((int) response_code, szString, _INT_T_LEN));
+            m_Into.AddPair("CURLINFO_EFFECTIVE_URL", url);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        int CCurlFileServer::GetResponseCode() const {
+            const auto &code = m_Into["CURLINFO_RESPONSE_CODE"];
+            return code.empty() ? 0 : (int) StrToInt(code.c_str());
+        }
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServerThread -----------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThread::CFileServerThread(CFileServer *AFileServer, CFileHandler *AHandler, CFileServerThreadMgr *AThreadMgr):
+                CThread(true), CGlobalComponent() {
+
+            m_pFileServer = AFileServer;
+            m_pHandler = AHandler;
+            m_pThreadMgr = AThreadMgr;
+
+            if (Assigned(m_pHandler))
+                m_pHandler->SetThread(this);
+
+            if (Assigned(m_pThreadMgr))
+                m_pThreadMgr->ActiveThreads().Add(this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThread::~CFileServerThread() {
+            if (Assigned(m_pHandler)) {
+                m_pHandler->SetThread(nullptr);
+                m_pHandler = nullptr;
+            }
+
+            if (Assigned(m_pThreadMgr))
+                m_pThreadMgr->ActiveThreads().Remove(this);
+
+            m_pThreadMgr = nullptr;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServerThread::TerminateAndWaitFor() {
+            if (FreeOnTerminate())
+                throw Delphi::Exception::Exception(_T("Cannot call TerminateAndWaitFor on FreeAndTerminate threads."));
+
+            Terminate();
+            if (Suspended())
+                Resume();
+
+            WaitFor();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServerThread::Execute() {
+            m_pFileServer->CURL(m_pHandler);
+        }
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        //-- CFileServerThreadMgr --------------------------------------------------------------------------------------
+
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThreadMgr::CFileServerThreadMgr() {
+            m_ThreadPriority = tpNormal;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThreadMgr::~CFileServerThreadMgr() {
+            TerminateThreads();
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThread *CFileServerThreadMgr::GetThread(CFileServer *AFileServer, CFileHandler *AHandler) {
+            return new CFileServerThread(AFileServer, AHandler, this);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServerThreadMgr::TerminateThreads() {
+            while (m_ActiveThreads.List().Count() > 0) {
+                auto pThread = static_cast<CFileServerThread *> (m_ActiveThreads.List().Last());
+                ReleaseThread(pThread);
+            }
+        }
+
+        //--------------------------------------------------------------------------------------------------------------
+
         //-- CFileHandler ----------------------------------------------------------------------------------------------
 
         //--------------------------------------------------------------------------------------------------------------
@@ -72,6 +182,9 @@ namespace Apostol {
 
             m_Session = m_Payload["session"].AsString();
             m_FileId = m_Payload["id"].AsString();
+
+            m_pThread = nullptr;
+            m_pConnection = nullptr;
         }
 
         //--------------------------------------------------------------------------------------------------------------
@@ -287,6 +400,31 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CFileServer::SendFile(CHTTPServerConnection *AConnection, const CString &FileName) {
+            if (AConnection != nullptr && AConnection->Connected()) {
+                CString sFileExt;
+                TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
+
+                auto sModified = StrWebTime(FileAge(FileName.c_str()), szBuffer, sizeof(szBuffer));
+                if (sModified != nullptr) {
+                    AConnection->Reply().AddHeader(_T("Last-Modified"), sModified);
+                }
+
+                sFileExt = ExtractFileExt(szBuffer, FileName.c_str());
+
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
+                AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+#else
+                if (AConnection->IOHandler()->UsedSSL()) {
+                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                } else {
+                    AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+                }
+#endif
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CFileServer::DeleteFile(const CString &FileName) {
             if (FileExists(FileName.c_str())) {
                 if (::unlink(FileName.c_str()) == FILE_ERROR) {
@@ -298,6 +436,65 @@ namespace Apostol {
 
         void CFileServer::DoError(const Delphi::Exception::Exception &E) {
             Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", E.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoFail(CQueueHandler *AHandler, const CString &Message) {
+            Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", Message.c_str());
+            DeleteHandler(AHandler);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::CURL(CFileHandler *AHandler) {
+            CCurlFileServer curl;
+            CHeaders Headers;
+
+            CURLcode code;
+
+            int i = 0;
+            do {
+                code = curl.Get(AHandler->URI(), {});
+                if (code != CURLE_OK) {
+                    sleep(1);
+                }
+            } while ((code != CURLE_OK) && ++i < 2);
+
+            if (code == CURLE_OK) {
+                const auto http_code = curl.GetResponseCode();
+
+                if (http_code == 200) {
+                    curl.Result().SaveToFile(AHandler->FileName().c_str());
+                }
+
+                if (AHandler->Connection() != nullptr) {
+                    if (http_code == 200) {
+                        SendFile(AHandler->Connection(), AHandler->FileName());
+                    } else {
+                        ReplyError(AHandler->Connection(), CHTTPReply::not_found, "Not found");
+                    }
+                }
+
+                DeleteHandler(AHandler);
+            } else {
+                DoFail(AHandler, CCurlApi::GetErrorMessage(code));
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoLink(CQueueHandler *AHandler) {
+            try {
+                auto pThread = GetThread(dynamic_cast<CFileHandler *> (AHandler));
+
+                AHandler->Allow(false);
+                AHandler->UpdateTimeOut(Now());
+
+                IncProgress();
+
+                pThread->FreeOnTerminate(true);
+                pThread->Resume();
+            } catch (std::exception &e) {
+                DoFail((CFetchHandler *) AHandler, e.what());
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -320,19 +517,28 @@ namespace Apostol {
                     if (pqResults[QUERY_INDEX_DATA].Count() == 1) {
                         const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
+                        const auto &type = caFile["type"];
                         const auto &name = caFile["name"];
                         const auto &path = caFile["path"];
                         const auto &data = caFile["data"];
 
                         if (!data.empty()) {
                             const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                            ForceDirectories(caFilePath.c_str(), 0777);
+                            ForceDirectories(caFilePath.c_str(), 0755);
                             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                             DeleteFile(caFileName);
 
-                            auto decode = base64_decode(squeeze(data));
-                            decode.SaveToFile(caFileName.c_str());
+                            const auto &decode = base64_decode(squeeze(data));
+
+                            if (type == "-") {
+                                decode.SaveToFile(caFileName.c_str());
+                            } else if (type == "l") {
+                                pHandler->URI() = decode;
+                                pHandler->FileName() = caFileName;
+                                DoLink(pHandler);
+                                return;
+                            }
                         }
                     }
                 } catch (Delphi::Exception::Exception &E) {
@@ -340,14 +546,14 @@ namespace Apostol {
                 }
 
                 DeleteHandler(pHandler);
-                UnloadQueue();
             };
 
             auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
-                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
-                DeleteHandler(pHandler);
-                UnloadQueue();
                 DoError(E);
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                if (pHandler != nullptr) {
+                    DeleteHandler(pHandler);
+                }
             };
 
             auto pHandler = dynamic_cast<CFileHandler *> (AHandler);
@@ -361,9 +567,7 @@ namespace Apostol {
                 const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                 DeleteFile(caFileName);
-
                 DeleteHandler(AHandler);
-                UnloadQueue();
             } else {
                 CStringList SQL;
 
@@ -375,8 +579,8 @@ namespace Apostol {
                     AHandler->Allow(false);
                     IncProgress();
                 } catch (Delphi::Exception::Exception &E) {
-                    DeleteHandler(AHandler);
                     DoError(E);
+                    DeleteHandler(AHandler);
                 }
             }
         }
@@ -406,40 +610,38 @@ namespace Apostol {
 
                     const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
+                    const auto &type = caFile["type"];
                     const auto &name = caFile["name"];
                     const auto &path = caFile["path"];
                     const auto &date = caFile["date"];
-                    const auto &data = caFile["data"].IsEmpty() ? CString() : caFile["data"];
+                    const auto &data = caFile["data"];
 
-                    CString sFileExt;
-                    TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
-
-                    sFileExt = ExtractFileExt(szBuffer, name.c_str());
-
-                    if (data.IsEmpty()) {
+                    if (data.empty()) {
                         Reply.Content.Clear();
                         AConnection->SendStockReply(CHTTPReply::no_content, true);
                         return;
                     }
 
                     const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                    ForceDirectories(caFilePath.c_str(), 0700);
+                    ForceDirectories(caFilePath.c_str(), 0755);
                     const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
 
                     DeleteFile(caFileName);
 
-                    Reply.Content = base64_decode(squeeze(data));
-                    Reply.Content.SaveToFile(caFileName.c_str());
+                    if (type == "-") {
+                        Reply.Content = base64_decode(squeeze(data));
+                        Reply.Content.SaveToFile(caFileName.c_str());
 
-#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
-                    AConnection->SendFileReply(caFileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
-#else
-                    if (AConnection->IOHandler()->UsedSSL()) {
-                        AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+                        SendFile(AConnection, caFileName);
+                    } else if (type == "l") {
+                        auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
+                        pHandler->URI() = base64_decode(squeeze(data));;
+                        pHandler->FileName() = caFileName;
+                        pHandler->SetConnection(AConnection);
+                        UnloadQueue();
                     } else {
-                        AConnection->SendFileReply(caFileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+                        ReplyError(AConnection, CHTTPReply::not_found, "Invalid file type");
                     }
-#endif
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
@@ -464,26 +666,7 @@ namespace Apostol {
                     const auto &name = AConnection->Data()["name"];
                     const auto &filename = AConnection->Data()["filename"];
 
-                    CString sFileExt;
-                    TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
-
-                    sFileExt = ExtractFileExt(szBuffer, name.c_str());
-
-                    auto sModified = StrWebTime(FileAge(filename.c_str()), szBuffer, sizeof(szBuffer));
-                    if (sModified != nullptr) {
-                        Reply.AddHeader(_T("Last-Modified"), sModified);
-                    }
-
-#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
-                    AConnection->SendFileReply(filename.c_str(), Mapping::ExtToType(sFileExt.c_str()));
-#else
-                    if (AConnection->IOHandler()->UsedSSL()) {
-                        Reply.Content.LoadFromFile(filename);
-                        AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
-                    } else {
-                        AConnection->SendFileReply(filename.c_str(), Mapping::ExtToType(sFileExt.c_str()));
-                    }
-#endif
+                    SendFile(AConnection, filename);
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
@@ -777,7 +960,12 @@ namespace Apostol {
                 m_Path = m_Path + "/";
             }
 
-            ForceDirectories(m_Path.c_str(), 0777);
+            ForceDirectories(m_Path.c_str(), 0755);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        CFileServerThread *CFileServer::GetThread(CFileHandler *AHandler) {
+            return m_ThreadMgr.GetThread(this, AHandler);
         }
         //--------------------------------------------------------------------------------------------------------------
 
