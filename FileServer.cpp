@@ -449,15 +449,7 @@ namespace Apostol {
             CCurlFileServer curl;
             CHeaders Headers;
 
-            CURLcode code;
-
-            int i = 0;
-            do {
-                code = curl.Get(AHandler->URI(), {});
-                if (code != CURLE_OK) {
-                    sleep(1);
-                }
-            } while ((code != CURLE_OK) && ++i < 2);
+            auto code = curl.Get(AHandler->URI(), {});
 
             if (code == CURLE_OK) {
                 const auto http_code = curl.GetResponseCode();
@@ -485,10 +477,12 @@ namespace Apostol {
             try {
                 auto pThread = GetThread(dynamic_cast<CFileHandler *> (AHandler));
 
-                AHandler->Allow(false);
-                AHandler->UpdateTimeOut(Now());
+                if (AHandler->Allow()) {
+                    AHandler->Allow(false);
+                    AHandler->UpdateTimeOut(Now());
 
-                IncProgress();
+                    IncProgress();
+                }
 
                 pThread->FreeOnTerminate(true);
                 pThread->Resume();
@@ -635,7 +629,7 @@ namespace Apostol {
                         SendFile(AConnection, caFileName);
                     } else if (type == "l") {
                         auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
-                        pHandler->URI() = base64_decode(squeeze(data));;
+                        pHandler->URI() = base64_decode(squeeze(data));
                         pHandler->FileName() = caFileName;
                         pHandler->SetConnection(AConnection);
                         UnloadQueue();
