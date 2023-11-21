@@ -31,6 +31,7 @@ Author:
 
 #define QUERY_INDEX_AUTH     0
 #define QUERY_INDEX_DATA     1
+#define QUERY_FILES_DATA     0
 
 #define PG_CONFIG_NAME "helper"
 #define PG_LISTEN_NAME "file"
@@ -503,13 +504,8 @@ namespace Apostol {
                 try {
                     CApostolModule::QueryToResults(APollQuery, pqResults);
 
-                    const auto &authorize = pqResults[QUERY_INDEX_AUTH].First();
-
-                    if (authorize["authorized"] != "t")
-                        throw Delphi::Exception::ExceptionFrm("Authorization failed: %s", authorize["message"].c_str());
-
-                    if (pqResults[QUERY_INDEX_DATA].Count() == 1) {
-                        const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
+                    if (pqResults[QUERY_FILES_DATA].Count() == 1) {
+                        const auto &caFile = pqResults[QUERY_FILES_DATA].First();
 
                         const auto &type = caFile["type"];
                         const auto &name = caFile["name"];
@@ -565,7 +561,6 @@ namespace Apostol {
             } else {
                 CStringList SQL;
 
-                api::authorize(SQL, pHandler->Session());
                 api::get_file(SQL, pHandler->FileId());
 
                 try {
