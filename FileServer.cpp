@@ -403,6 +403,8 @@ namespace Apostol {
 
         void CFileServer::SendFile(CHTTPServerConnection *AConnection, const CString &FileName) {
             if (AConnection != nullptr && AConnection->Connected()) {
+                auto &Reply = AConnection->Reply();
+
                 CString sFileExt;
                 TCHAR szBuffer[MAX_BUFFER_SIZE + 1] = {0};
 
@@ -413,14 +415,20 @@ namespace Apostol {
 
                 sFileExt = ExtractFileExt(szBuffer, FileName.c_str());
 
-#if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
+#if (APOSTOL_USE_SEND_FILE)
+  #if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
+            AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+  #else
+            if (AConnection->IOHandler()->UsedSSL()) {
+                Reply.Content.LoadFromFile(FileName.c_str());
+                AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
+            } else {
                 AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
+            }
+  #endif
 #else
-                if (AConnection->IOHandler()->UsedSSL()) {
-                    AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
-                } else {
-                    AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
-                }
+                Reply.Content.LoadFromFile(FileName.c_str());
+                AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
 #endif
             }
         }
