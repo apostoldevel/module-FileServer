@@ -676,6 +676,8 @@ namespace Apostol {
             const auto &caFilePath = m_Path + (path_separator(Path.front()) ? Path.SubString(1) : Path);
             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
 
+            AConnection->TimeOut(INFINITE);
+
             AConnection->Data().AddPair("name", sName);
             AConnection->Data().AddPair("filepath", caFilePath);
             AConnection->Data().AddPair("filename", caFileName);
