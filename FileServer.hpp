@@ -74,10 +74,15 @@ namespace Apostol {
             CJSON m_Payload;
 
             CLocation m_URI;
+
+            CString m_Path;
+            CString m_Name;
             CString m_FileName;
 
             CFileServerThread *m_pThread;
             CHTTPServerConnection *m_pConnection;
+
+            void SetConnection(CHTTPServerConnection *AConnection);
 
         public:
 
@@ -91,6 +96,12 @@ namespace Apostol {
             CLocation &URI() { return m_URI; }
             const CLocation &URI() const { return m_URI; }
 
+            CString &Path() { return m_Path; }
+            const CString &Path() const { return m_Path; }
+
+            CString &Name() { return m_Name; }
+            const CString &Name() const { return m_Name; }
+
             CString &FileName() { return m_FileName; }
             const CString &FileName() const { return m_FileName; }
 
@@ -98,7 +109,7 @@ namespace Apostol {
             void SetThread(CFileServerThread *AThread) { m_pThread = AThread; };
 
             CHTTPServerConnection *Connection() const { return m_pConnection; };
-            void SetConnection(CHTTPServerConnection *AConnection) { m_pConnection = AConnection; };
+            void Connection(CHTTPServerConnection *AConnection) { SetConnection(AConnection); };
 
         };
 
@@ -239,6 +250,9 @@ namespace Apostol {
             static void DeleteFile(const CString &FileName);
             static void SendFile(CHTTPServerConnection *AConnection, const CString &FileName);
 
+            CPQPollQuery *ExecuteSQL(const CStringList &SQL, CFileHandler *AHandler,
+                COnApostolModuleSuccessEvent && OnSuccess, COnApostolModuleFailEvent && OnFail = nullptr);
+
             CString VerifyToken(const CString &Token);
 
         protected:
@@ -248,11 +262,10 @@ namespace Apostol {
 
             void DoFile(CQueueHandler *AHandler);
             void DoLink(CQueueHandler *AHandler);
+            void DoGetFile(CQueueHandler *AHandler);
 
             void DoGet(CHTTPServerConnection *AConnection) override;
             void DoPost(CHTTPServerConnection *AConnection);
-
-            void DoGetFile(CHTTPServerConnection *AConnection, const CString &Session, const CString &Path, const CString &Name);
 
             void DoPostgresNotify(CPQConnection *AConnection, PGnotify *ANotify) override;
 

@@ -187,6 +187,16 @@ namespace Apostol {
             m_pThread = nullptr;
             m_pConnection = nullptr;
         }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileHandler::SetConnection(CHTTPServerConnection *AConnection) {
+            if (m_pConnection != AConnection) {
+                if (AConnection != nullptr) {
+                    AConnection->TimeOut(INFINITE);
+                }
+                m_pConnection = AConnection;
+            }
+        }
 
         //--------------------------------------------------------------------------------------------------------------
 
@@ -401,6 +411,31 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        CPQPollQuery *CFileServer::ExecuteSQL(const CStringList &SQL, CFileHandler *AHandler,
+                COnApostolModuleSuccessEvent &&OnSuccess, COnApostolModuleFailEvent &&OnFail) {
+
+            auto OnExecuted = [this, OnSuccess](CPQPollQuery *APollQuery) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                auto pConnection = pHandler->Connection();
+                if (pConnection != nullptr && pConnection->Connected()) {
+                    OnSuccess(pConnection, APollQuery);
+                }
+                DeleteHandler(pHandler);
+            };
+
+            auto OnException = [this, OnFail](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                auto pConnection = pHandler->Connection();
+                if (pConnection != nullptr && pConnection->Connected()) {
+                    OnFail(pConnection, E);
+                }
+                DeleteHandler(pHandler);
+            };
+
+            return ExecSQL(SQL, AHandler, OnExecuted, OnException);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         void CFileServer::SendFile(CHTTPServerConnection *AConnection, const CString &FileName) {
             if (AConnection != nullptr && AConnection->Connected()) {
                 auto &Reply = AConnection->Reply();
@@ -556,6 +591,9 @@ namespace Apostol {
 
             auto pHandler = dynamic_cast<CFileHandler *> (AHandler);
 
+            AHandler->Allow(false);
+            IncProgress();
+
             const auto &operation = pHandler->Payload()["operation"].AsString();
             const auto &name = pHandler->Payload()["name"].AsString();
             const auto &path = pHandler->Payload()["path"].AsString();
@@ -573,18 +611,14 @@ namespace Apostol {
 
                 try {
                     ExecSQL(SQL, AHandler, OnExecuted, OnException);
-                    AHandler->Allow(false);
-                    IncProgress();
                 } catch (Delphi::Exception::Exception &E) {
-                    DoError(E);
-                    DeleteHandler(AHandler);
+                    DoFail(AHandler, E.Message());
                 }
             }
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoGetFile(CHTTPServerConnection *AConnection, const CString &Session,
-                const CString &Path, const CString &Name) {
+        void CFileServer::DoGetFile(CQueueHandler *AHandler) {
 
             auto OnSuccess = [this](CHTTPServerConnection *AConnection, CPQPollQuery *APollQuery) {
 
@@ -634,7 +668,7 @@ namespace Apostol {
                         auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
                         pHandler->URI() = base64_decode(squeeze(data));
                         pHandler->FileName() = caFileName;
-                        pHandler->SetConnection(AConnection);
+                        pHandler->Connection(AConnection);
                         UnloadQueue();
                     } else {
                         ReplyError(AConnection, CHTTPReply::not_found, "Invalid file type");
@@ -660,7 +694,6 @@ namespace Apostol {
 
                     auto &Reply = AConnection->Reply();
 
-                    const auto &name = AConnection->Data()["name"];
                     const auto &filename = AConnection->Data()["filename"];
 
                     SendFile(AConnection, filename);
@@ -675,6 +708,17 @@ namespace Apostol {
                 ReplyError(AConnection, CHTTPReply::internal_server_error, E.what());
             };
 
+            auto pHandler = dynamic_cast<CFileHandler *> (AHandler);
+
+            AHandler->Allow(false);
+            IncProgress();
+
+            auto pConnection = pHandler->Connection();
+
+            const CString Session(pHandler->Session());
+            const CString Path(pHandler->Path());
+            const CString Name(pHandler->Name());
+
             CString sName(CHTTPServer::URLDecode(Name));
 
             if (path_separator(sName.back())) {
@@ -684,30 +728,33 @@ namespace Apostol {
             const auto &caFilePath = m_Path + (path_separator(Path.front()) ? Path.SubString(1) : Path);
             const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
 
-            AConnection->TimeOut(INFINITE);
-
-            AConnection->Data().AddPair("name", sName);
-            AConnection->Data().AddPair("filepath", caFilePath);
-            AConnection->Data().AddPair("filename", caFileName);
+            pConnection->Data().AddPair("name", sName);
+            pConnection->Data().AddPair("filepath", caFilePath);
+            pConnection->Data().AddPair("filename", caFileName);
 
             CStringList SQL;
 
             if (FileExists(caFileName.c_str())) {
-                api::authorize(SQL, Session);
+                if (Session == m_Session) {
+                    SendFile(pConnection, caFileName);
+                    DeleteHandler(AHandler);
+                } else {
+                    api::authorize(SQL, Session);
 
-                try {
-                    ExecuteSQL(SQL, AConnection, OnContinue, OnFail);
-                } catch (Delphi::Exception::Exception &E) {
-                    Log()->Error(APP_LOG_EMERG, 0, E.what());
+                    try {
+                        ExecuteSQL(SQL, pHandler, OnContinue, OnFail);
+                    } catch (Delphi::Exception::Exception &E) {
+                        DoFail(AHandler, E.Message());
+                    }
                 }
             } else {
                 api::authorize(SQL, Session);
                 api::get_file(SQL, Name, Path);
 
                 try {
-                    ExecuteSQL(SQL, AConnection, OnSuccess, OnFail);
+                    ExecuteSQL(SQL, pHandler, OnSuccess, OnFail);
                 } catch (Delphi::Exception::Exception &E) {
-                    Log()->Error(APP_LOG_EMERG, 0, E.what());
+                    DoFail(AHandler, E.Message());
                 }
             }
         }
@@ -794,7 +841,16 @@ namespace Apostol {
                 }
             }
 
-            DoGetFile(AConnection, Session, sPath, sName);
+#if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
+            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", Session.c_str()), [this](auto &&Handler) { DoGetFile(Handler); });
+#else
+            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", Session.c_str()), std::bind(&CFileServer::DoFile, this, _1));
+#endif
+            pHandler->Path() = sPath;
+            pHandler->Name() = sName;
+            pHandler->Connection(AConnection);
+
+            UnloadQueue();
         }
         //--------------------------------------------------------------------------------------------------------------
 
