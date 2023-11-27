@@ -67,7 +67,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         CCurlFileServer::CCurlFileServer(): CCurlApi() {
-
+            m_TimeOut = 3;
         }
         //--------------------------------------------------------------------------------------------------------------
 
@@ -497,7 +497,14 @@ namespace Apostol {
             CCurlFileServer curl;
             CHeaders Headers;
 
-            auto code = curl.Get(AHandler->URI(), {});
+            CURLcode code;
+            int i = 0;
+            do {
+                code = curl.Get(AHandler->URI(), {});
+                if (code != CURLE_OK) {
+                    sleep(1);
+                }
+            } while (code != CURLE_OK && i++ < 3);
 
             if (code == CURLE_OK) {
                 const auto http_code = curl.GetResponseCode();
