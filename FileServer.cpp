@@ -458,6 +458,7 @@ namespace Apostol {
                 if (Reply.Content.IsEmpty()) {
                     Reply.Content.LoadFromFile(FileName.c_str());
                 }
+
                 AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
             } else {
                 AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
@@ -467,6 +468,7 @@ namespace Apostol {
                 if (Reply.Content.IsEmpty()) {
                     Reply.Content.LoadFromFile(FileName.c_str());
                 }
+
                 AConnection->SendReply(CHTTPReply::ok, Mapping::ExtToType(sFileExt.c_str()), true);
 #endif
             }
@@ -506,24 +508,35 @@ namespace Apostol {
                 }
             } while (code != CURLE_OK && i++ < 3);
 
-            if (code == CURLE_OK) {
-                const auto http_code = curl.GetResponseCode();
+            auto pConnection = AHandler->Connection();
 
-                if (http_code == 200) {
-                    curl.Result().SaveToFile(AHandler->FileName().c_str());
-                }
+            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
+                if (code == CURLE_OK) {
+                    const auto http_code = curl.GetResponseCode();
 
-                if (AHandler->Connection() != nullptr) {
                     if (http_code == 200) {
-                        SendFile(AHandler->Connection(), AHandler->FileName());
-                    } else {
-                        ReplyError(AHandler->Connection(), CHTTPReply::not_found, "Not found");
-                    }
-                }
+#if (APOSTOL_USE_SEND_FILE)
+                        curl.Result().SaveToFile(AHandler->FileName().c_str());
+#else
+                        auto &Reply = pConnection->Reply();
 
-                DeleteHandler(AHandler);
+                        Reply.Content = curl.Result();
+                        Reply.Content.SaveToFile(AHandler->FileName().c_str());
+#endif
+                        SendFile(pConnection, AHandler->FileName());
+                    } else {
+                        ReplyError(pConnection, CHTTPReply::not_found, CCurlApi::GetErrorMessage(code));
+                    }
+
+                    DeleteHandler(AHandler);
+                } else {
+                    const CString Message(CCurlApi::GetErrorMessage(code));
+
+                    ReplyError(pConnection, CHTTPReply::bad_request, Message);
+                    DoFail(AHandler, Message);
+                }
             } else {
-                DoFail(AHandler, CCurlApi::GetErrorMessage(code));
+                DoFail(AHandler, "Connection lost");
             }
         }
         //--------------------------------------------------------------------------------------------------------------
