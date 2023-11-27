@@ -450,9 +450,6 @@ namespace Apostol {
 
                 sFileExt = ExtractFileExt(szBuffer, FileName.c_str());
 
-                AConnection->CloseConnection(true);
-                Reply.CloseConnection = true;
-
 #if (APOSTOL_USE_SEND_FILE)
   #if (OPENSSL_VERSION_NUMBER >= 0x30000000L) && defined(BIO_get_ktls_send)
             AConnection->SendFileReply(FileName.c_str(), Mapping::ExtToType(sFileExt.c_str()));
