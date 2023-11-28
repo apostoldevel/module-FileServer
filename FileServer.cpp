@@ -192,7 +192,8 @@ namespace Apostol {
         void CFileHandler::SetConnection(CHTTPServerConnection *AConnection) {
             if (m_pConnection != AConnection) {
                 if (AConnection != nullptr) {
-                    AConnection->TimeOut(INFINITE);
+                    AConnection->TimeOutInterval(30 * 1000);
+                    AConnection->UpdateTimeOut(Now());
                 }
                 m_pConnection = AConnection;
             }
@@ -525,7 +526,7 @@ namespace Apostol {
 #endif
                         SendFile(pConnection, AHandler->FileName());
                     } else {
-                        ReplyError(pConnection, CHTTPReply::not_found, CCurlApi::GetErrorMessage(code));
+                        ReplyError(pConnection, CHTTPReply::not_found, "Not found");
                     }
 
                     DeleteHandler(AHandler);
