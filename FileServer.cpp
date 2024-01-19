@@ -35,6 +35,8 @@ Author:
 
 #define PG_CONFIG_NAME "helper"
 #define PG_LISTEN_NAME "file"
+
+#define FILE_SERVER_ERROR_MESSAGE "[FileServer] Error: %s"
 //----------------------------------------------------------------------------------------------------------------------
 
 #include "jwt.h"
@@ -485,59 +487,187 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoError(const Delphi::Exception::Exception &E) {
-            Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", E.what());
+        CJSON CFileServer::ParamsToJson(const CStringList &Params) {
+            CJSON Json;
+            for (int i = 0; i < Params.Count(); i++) {
+                Json.Object().AddPair(Params.Names(i), Params.Values(i));
+            }
+            return Json;
         }
         //--------------------------------------------------------------------------------------------------------------
 
-        void CFileServer::DoFail(CQueueHandler *AHandler, const CString &Message) {
-            Log()->Error(APP_LOG_ERR, 0, "[FileServer] Error: %s", Message.c_str());
+        CJSON CFileServer::HeadersToJson(const CHeaders &Headers) {
+            CJSON Json;
+            for (int i = 0; i < Headers.Count(); i++) {
+                const auto &caHeader = Headers[i];
+                Json.Object().AddPair(caHeader.Name(), caHeader.Value());
+            }
+            return Json;
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoError(const Delphi::Exception::Exception &E) {
+            Log()->Error(APP_LOG_ERR, 0, FILE_SERVER_ERROR_MESSAGE, E.what());
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoError(CQueueHandler *AHandler, const CString &Message) {
+            Log()->Error(APP_LOG_ERR, 0, FILE_SERVER_ERROR_MESSAGE, Message.c_str());
             DeleteHandler(AHandler);
         }
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::CURL(CFileHandler *AHandler) {
-            CCurlFileServer curl;
-            CHeaders Headers;
 
+            if (AHandler == nullptr)
+                return;
+
+            CCurlFileServer curl;
             CURLcode code;
-            int i = 0;
+
+            int count = 0;
             do {
                 code = curl.Get(AHandler->URI(), {});
                 if (code != CURLE_OK) {
                     sleep(1);
                 }
-            } while (code != CURLE_OK && i++ < 3);
+            } while (code != CURLE_OK && count++ < 3);
 
             auto pConnection = AHandler->Connection();
 
-            if (pConnection != nullptr && !pConnection->ClosedGracefully()) {
-                if (code == CURLE_OK) {
-                    const auto http_code = curl.GetResponseCode();
+            if (code == CURLE_OK) {
+                const auto http_code = curl.GetResponseCode();
+                CHTTPReply Reply;
 
-                    if (http_code == 200) {
-#if (APOSTOL_USE_SEND_FILE)
-                        curl.Result().SaveToFile(AHandler->FileName().c_str());
-#else
-                        auto &Reply = pConnection->Reply();
-
-                        Reply.Content = curl.Result();
-                        Reply.Content.SaveToFile(AHandler->FileName().c_str());
-#endif
-                        SendFile(pConnection, AHandler->FileName());
-                    } else {
-                        ReplyError(pConnection, CHTTPReply::not_found, "Not found");
-                    }
-
-                    DeleteHandler(AHandler);
-                } else {
-                    const CString Message(CCurlApi::GetErrorMessage(code));
-
-                    ReplyError(pConnection, CHTTPReply::bad_request, Message);
-                    DoFail(AHandler, Message);
+                Reply.Headers.Clear();
+                for (int i = 1; i < curl.Headers().Count(); i++) {
+                    const auto &Header = curl.Headers()[i];
+                    Reply.AddHeader(Header.Name(), Header.Value());
                 }
+
+                Reply.StatusString = http_code;
+
+                Reply.StatusText = Reply.StatusString;
+                Reply.StringToStatus();
+
+                Reply.Content = curl.Result();
+                Reply.ContentLength = Reply.Content.Length();
+
+                Reply.Content.SaveToFile(AHandler->FileName().c_str());
+
+                Reply.DelHeader("Transfer-Encoding");
+                Reply.DelHeader("Content-Encoding");
+                Reply.DelHeader("Content-Length");
+
+                Reply.AddHeader("Content-Length", CString::ToString(Reply.ContentLength));
+
+                DebugReply(Reply);
+
+                if (http_code == 200) {
+                    SendFile(pConnection, AHandler->FileName());
+                } else {
+                    const CString Message("Not found");
+                    ReplyError(pConnection, CHTTPReply::not_found, Message);
+                }
+
+                DoDone(AHandler, Reply);
             } else {
-                DoFail(AHandler, "Connection lost");
+                const CString Message(CCurlApi::GetErrorMessage(code));
+                ReplyError(pConnection, CHTTPReply::bad_request, Message);
+
+                DoFail(AHandler, Message);
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoDone(CFileHandler *AHandler, const CHTTPReply &Reply) {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                pHandler->Unlock();
+                DeleteHandler(pHandler);
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                pHandler->Unlock();
+                DoError(pHandler, E.Message());
+            };
+
+            const auto &caPayload = AHandler->Payload();
+            const auto &caDone = caPayload["done"];
+
+            if (caDone.IsNull()) {
+                AHandler->Unlock();
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            const auto &caHeaders = PQQuoteLiteral(HeadersToJson(Reply.Headers).ToString());
+            const auto &caContent = PQQuoteLiteral(base64_encode(Reply.Content));
+
+            const auto &caFileId = caPayload["id"].AsString();
+
+            CStringList SQL;
+
+            SQL.Add(CString()
+                            .MaxFormatSize(256 + caFileId.Size() + caHeaders.Size() + caContent.Size())
+                            .Format("SELECT %s(%s::uuid, %d, %s, %s::jsonb, decode(%s, 'base64'));",
+                                    caDone.AsString().c_str(),
+                                    PQQuoteLiteral(caFileId).c_str(),
+                                    (int) Reply.Status,
+                                    PQQuoteLiteral(Reply.StatusText).c_str(),
+                                    caHeaders.c_str(),
+                                    caContent.c_str()
+                            ));
+
+            try {
+                ExecSQL(SQL, AHandler, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(AHandler, E.Message());
+            }
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoFail(CFileHandler *AHandler, const CString &Message) {
+
+            auto OnExecuted = [this](CPQPollQuery *APollQuery) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                pHandler->Unlock();
+                DeleteHandler(pHandler);
+            };
+
+            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+                auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
+                pHandler->Unlock();
+                DoError(pHandler, E.Message());
+            };
+
+            const auto &caPayload = AHandler->Payload();
+            const auto &caFail = caPayload["fail"];
+
+            if (caFail.IsNull()) {
+                AHandler->Unlock();
+                DeleteHandler(AHandler);
+                return;
+            }
+
+            const auto &caFileId = caPayload["id"].AsString();
+
+            CStringList SQL;
+
+            SQL.Add(CString()
+                            .MaxFormatSize(256 + caFileId.Size() + Message.Size())
+                            .Format("SELECT %s(%s::uuid, %s);",
+                                    caFail.AsString().c_str(),
+                                    PQQuoteLiteral(caFileId).c_str(),
+                                    PQQuoteLiteral(Message).c_str()
+                            ));
+
+            try {
+                ExecSQL(SQL, AHandler, OnExecuted, OnException);
+            } catch (Delphi::Exception::Exception &E) {
+                DoError(AHandler, E.Message());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -553,10 +683,12 @@ namespace Apostol {
                     IncProgress();
                 }
 
+                AHandler->Locked();
+
                 pThread->FreeOnTerminate(true);
                 pThread->Resume();
             } catch (std::exception &e) {
-                DoFail((CFetchHandler *) AHandler, e.what());
+                DoError(AHandler, e.what());
             }
         }
         //--------------------------------------------------------------------------------------------------------------
@@ -565,35 +697,50 @@ namespace Apostol {
 
             auto OnExecuted = [this](CPQPollQuery *APollQuery) {
 
-                CPQueryResults pqResults;
-
                 auto pHandler = dynamic_cast<CFileHandler *> (APollQuery->Binding());
 
+                if (pHandler == nullptr)
+                    return;
+
+                CPQResult *pResult;
                 try {
-                    CApostolModule::QueryToResults(APollQuery, pqResults);
+                    for (int i = 0; i < APollQuery->Count(); i++) {
+                        pResult = APollQuery->Results(i);
 
-                    if (pqResults[QUERY_FILES_DATA].Count() == 1) {
-                        const auto &caFile = pqResults[QUERY_FILES_DATA].First();
+                        if (pResult->ExecStatus() != PGRES_TUPLES_OK)
+                            throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
 
-                        const auto &type = caFile["type"];
-                        const auto &name = caFile["name"];
-                        const auto &path = caFile["path"];
-                        const auto &data = caFile["data"];
+                        const auto &operation = pHandler->Payload()["operation"].AsString();
 
-                        if (!data.empty()) {
-                            const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                            ForceDirectories(caFilePath.c_str(), 0755);
-                            const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
+                        CString Json;
+                        Postgres::PQResultToJson(pResult, Json);
 
+                        pHandler->Payload() = Json;
+
+                        const auto &caFile = pHandler->Payload();
+
+                        const auto &type = caFile["type"].AsString();
+                        const auto &name = caFile["name"].AsString();
+                        const auto &path = caFile["path"].AsString();
+
+                        const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
+                        ForceDirectories(caFilePath.c_str(), 0755);
+
+                        const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
+                        pHandler->FileName() = caFileName;
+
+                        if (operation == "UPDATE" && type != "d") {
                             DeleteFile(caFileName);
+                        }
 
+                        if (!caFile["data"].IsNull()) {
+                            const auto &data = caFile["data"].AsString();
                             const auto &decode = base64_decode(squeeze(data));
 
                             if (type == "-") {
                                 decode.SaveToFile(caFileName.c_str());
                             } else if (type == "l") {
                                 pHandler->URI() = decode;
-                                pHandler->FileName() = caFileName;
                                 DoLink(pHandler);
                                 return;
                             }
@@ -637,7 +784,7 @@ namespace Apostol {
                 try {
                     ExecSQL(SQL, AHandler, OnExecuted, OnException);
                 } catch (Delphi::Exception::Exception &E) {
-                    DoFail(AHandler, E.Message());
+                    DoError(AHandler, E.Message());
                 }
             }
         }
@@ -769,7 +916,7 @@ namespace Apostol {
                     try {
                         ExecuteSQL(SQL, pHandler, OnContinue, OnFail);
                     } catch (Delphi::Exception::Exception &E) {
-                        DoFail(AHandler, E.Message());
+                        DoError(AHandler, E.Message());
                     }
                 }
             } else {
@@ -779,7 +926,7 @@ namespace Apostol {
                 try {
                     ExecuteSQL(SQL, pHandler, OnSuccess, OnFail);
                 } catch (Delphi::Exception::Exception &E) {
-                    DoFail(AHandler, E.Message());
+                    DoError(AHandler, E.Message());
                 }
             }
         }
@@ -917,7 +1064,7 @@ namespace Apostol {
                 }
             };
 
-            auto OnException = [this](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
+            auto OnException = [](CPQPollQuery *APollQuery, const Delphi::Exception::Exception &E) {
                 DoError(E);
             };
 

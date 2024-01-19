@@ -91,6 +91,7 @@ namespace Apostol {
             const CString &Session() const { return m_Session; }
             const CString &FileId() const { return m_FileId; }
 
+            CJSON &Payload() { return m_Payload; }
             const CJSON &Payload() const { return m_Payload; }
 
             CLocation &URI() { return m_URI; }
@@ -229,6 +230,9 @@ namespace Apostol {
 
             CFileServerThreadMgrDefault m_ThreadMgr;
 
+            static CJSON ParamsToJson(const CStringList &Params);
+            static CJSON HeadersToJson(const CHeaders &Headers);
+
             void InitMethods() override;
 
             void InitListen();
@@ -257,8 +261,11 @@ namespace Apostol {
 
         protected:
 
-            void DoError(const Delphi::Exception::Exception &E);
-            void DoFail(CQueueHandler *AHandler, const CString &Message);
+            static void DoError(const Delphi::Exception::Exception &E);
+            void DoError(CQueueHandler *AHandler, const CString &Message);
+
+            void DoDone(CFileHandler *AHandler, const CHTTPReply &Reply);
+            void DoFail(CFileHandler *AHandler, const CString &Message);
 
             void DoFile(CQueueHandler *AHandler);
             void DoLink(CQueueHandler *AHandler);
