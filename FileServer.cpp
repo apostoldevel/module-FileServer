@@ -37,6 +37,8 @@ Author:
 #define PG_LISTEN_NAME "file"
 
 #define FILE_SERVER_ERROR_MESSAGE "[FileServer] Error: %s"
+#define FILE_SERVER_HTTPS "https://"
+#define FILE_SERVER_HTTP "http://"
 //----------------------------------------------------------------------------------------------------------------------
 
 #include "jwt.h"
@@ -184,7 +186,12 @@ namespace Apostol {
             m_Payload = Data;
 
             m_Session = m_Payload["session"].AsString();
+            m_Operation = m_Payload["operation"].AsString();
             m_FileId = m_Payload["id"].AsString();
+            m_Type = m_Payload["type"].AsString();
+            m_Path = m_Payload["path"].AsString();
+            m_Name = m_Payload["name"].AsString();
+            m_Hash = m_Payload["hash"].AsString();
 
             m_pThread = nullptr;
             m_pConnection = nullptr;
@@ -546,31 +553,35 @@ namespace Apostol {
                 }
 
                 Reply.StatusString = http_code;
-
                 Reply.StatusText = Reply.StatusString;
+
                 Reply.StringToStatus();
 
-                Reply.Content = curl.Result();
-                Reply.ContentLength = Reply.Content.Length();
-
-                Reply.Content.SaveToFile(AHandler->FileName().c_str());
-
-                Reply.DelHeader("Transfer-Encoding");
-                Reply.DelHeader("Content-Encoding");
-                Reply.DelHeader("Content-Length");
-
-                Reply.AddHeader("Content-Length", CString::ToString(Reply.ContentLength));
-
-                DebugReply(Reply);
-
                 if (http_code == 200) {
-                    SendFile(pConnection, AHandler->FileName());
+                    DeleteFile(AHandler->AbsoluteName());
+
+                    Reply.Content = curl.Result();
+                    Reply.ContentLength = Reply.Content.Length();
+
+                    Reply.DelHeader("Transfer-Encoding");
+                    Reply.DelHeader("Content-Encoding");
+                    Reply.DelHeader("Content-Length");
+
+                    Reply.AddHeader("Content-Length", CString::ToString(Reply.ContentLength));
+
+                    Reply.Content.SaveToFile(AHandler->AbsoluteName().c_str());
+
+                    SendFile(pConnection, AHandler->AbsoluteName());
+
+                    DoDone(AHandler, Reply);
                 } else {
                     const CString Message("Not found");
                     ReplyError(pConnection, CHTTPReply::not_found, Message);
+
+                    DoFail(AHandler, Message);
                 }
 
-                DoDone(AHandler, Reply);
+                DebugReply(Reply);
             } else {
                 const CString Message(CCurlApi::GetErrorMessage(code));
                 ReplyError(pConnection, CHTTPReply::bad_request, Message);
@@ -594,31 +605,28 @@ namespace Apostol {
                 DoError(pHandler, E.Message());
             };
 
-            const auto &caPayload = AHandler->Payload();
-            const auto &caDone = caPayload["done"];
-
-            if (caDone.IsNull()) {
+            if (AHandler->Done().IsEmpty()) {
                 AHandler->Unlock();
                 DeleteHandler(AHandler);
                 return;
             }
 
-            const auto &caHeaders = PQQuoteLiteral(HeadersToJson(Reply.Headers).ToString());
-            const auto &caContent = PQQuoteLiteral(base64_encode(Reply.Content));
-
-            const auto &caFileId = caPayload["id"].AsString();
+            const auto &caFileId = PQQuoteLiteral(AHandler->FileId());
+            const auto &caAbsoluteName = PQQuoteLiteral(AHandler->AbsoluteName());
+            const auto &caHash = SHA256(Reply.Content, true);
+            const auto &caContentType = PQQuoteLiteral(Reply.Headers["Content-Type"]);
 
             CStringList SQL;
 
             SQL.Add(CString()
-                            .MaxFormatSize(256 + caFileId.Size() + caHeaders.Size() + caContent.Size())
-                            .Format("SELECT %s(%s::uuid, %d, %s, %s::jsonb, decode(%s, 'base64'));",
-                                    caDone.AsString().c_str(),
-                                    PQQuoteLiteral(caFileId).c_str(),
-                                    (int) Reply.Status,
-                                    PQQuoteLiteral(Reply.StatusText).c_str(),
-                                    caHeaders.c_str(),
-                                    caContent.c_str()
+                            .MaxFormatSize(256 + caFileId.Size() + caAbsoluteName.Size() + caHash.Size() + caContentType.Size())
+                            .Format("SELECT %s(%s::uuid, %s, %d, '%s', %s);",
+                                    AHandler->Done().c_str(),
+                                    caFileId.c_str(),
+                                    caAbsoluteName.c_str(),
+                                    Reply.ContentLength,
+                                    caHash.c_str(),
+                                    caContentType.c_str()
                             ));
 
             try {
@@ -643,25 +651,23 @@ namespace Apostol {
                 DoError(pHandler, E.Message());
             };
 
-            const auto &caPayload = AHandler->Payload();
-            const auto &caFail = caPayload["fail"];
-
-            if (caFail.IsNull()) {
+            if (AHandler->Fail().IsEmpty()) {
                 AHandler->Unlock();
                 DeleteHandler(AHandler);
                 return;
             }
 
-            const auto &caFileId = caPayload["id"].AsString();
+            const auto &caFileId = PQQuoteLiteral(AHandler->FileId());
+            const auto &caMessage = PQQuoteLiteral(Message);
 
             CStringList SQL;
 
             SQL.Add(CString()
-                            .MaxFormatSize(256 + caFileId.Size() + Message.Size())
+                            .MaxFormatSize(256 + caFileId.Size() + caMessage.Size())
                             .Format("SELECT %s(%s::uuid, %s);",
-                                    caFail.AsString().c_str(),
-                                    PQQuoteLiteral(caFileId).c_str(),
-                                    PQQuoteLiteral(Message).c_str()
+                                    AHandler->Fail().c_str(),
+                                    caFileId.c_str(),
+                                    caMessage.c_str()
                             ));
 
             try {
@@ -710,39 +716,60 @@ namespace Apostol {
                         if (pResult->ExecStatus() != PGRES_TUPLES_OK)
                             throw Delphi::Exception::EDBError(pResult->GetErrorMessage());
 
-                        const auto &operation = pHandler->Payload()["operation"].AsString();
+                        const auto &operation = pHandler->Operation();
+                        const auto &old_hash = pHandler->Hash();
+                        const CString oldAbsoluteName(pHandler->AbsoluteName());
 
-                        CString Json;
-                        Postgres::PQResultToJson(pResult, Json);
+                        CString stringJson;
+                        Postgres::PQResultToJson(pResult, stringJson);
 
-                        pHandler->Payload() = Json;
+                        pHandler->Payload() = stringJson;
 
                         const auto &caFile = pHandler->Payload();
 
                         const auto &type = caFile["type"].AsString();
-                        const auto &name = caFile["name"].AsString();
                         const auto &path = caFile["path"].AsString();
+                        const auto &name = caFile["name"].AsString();
+                        const auto &hash = caFile["hash"].AsString();
+                        const auto &done = caFile["done"].AsString();
+                        const auto &fail = caFile["fail"].AsString();
 
-                        const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                        ForceDirectories(caFilePath.c_str(), 0755);
+                        const auto &caPath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
+                        ForceDirectories(caPath.c_str(), 0755);
+                        const auto &caAbsoluteName = path_separator(caPath.back()) ? caPath + name : caPath + "/" + name;
 
-                        const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
-                        pHandler->FileName() = caFileName;
-
-                        if (operation == "UPDATE" && type != "d") {
-                            DeleteFile(caFileName);
-                        }
+                        pHandler->AbsoluteName() = caAbsoluteName;
 
                         if (!caFile["data"].IsNull()) {
-                            const auto &data = caFile["data"].AsString();
-                            const auto &decode = base64_decode(squeeze(data));
-
                             if (type == "-") {
-                                decode.SaveToFile(caFileName.c_str());
+                                const bool changed = (operation == "UPDATE" && ((oldAbsoluteName != caAbsoluteName) || (old_hash != hash)));
+
+                                if (operation == "UPDATE" && (oldAbsoluteName != caAbsoluteName)) {
+                                    DeleteFile(oldAbsoluteName);
+                                }
+
+                                if (operation == "INSERT" || changed) {
+                                    const auto &data = caFile["data"].AsString();
+                                    const auto &decode = base64_decode(squeeze(data));
+
+                                    DeleteFile(caAbsoluteName);
+                                    decode.SaveToFile(caAbsoluteName.c_str());
+                                }
                             } else if (type == "l") {
-                                pHandler->URI() = decode;
-                                DoLink(pHandler);
-                                return;
+                                const auto &data = caFile["data"].AsString();
+                                const auto &decode = base64_decode(squeeze(data));
+
+                                if ((decode.substr(0, 8) == FILE_SERVER_HTTPS || decode.substr(0, 7) == FILE_SERVER_HTTP)) {
+                                    pHandler->URI() = decode;
+                                    pHandler->Done() = done;
+                                    pHandler->Fail() = fail;
+
+                                    DoLink(pHandler);
+
+                                    return;
+                                }
+                            } else if (type == "s") {
+                                DeleteFile(oldAbsoluteName);
                             }
                         }
                     }
@@ -766,15 +793,17 @@ namespace Apostol {
             AHandler->Allow(false);
             IncProgress();
 
-            const auto &operation = pHandler->Payload()["operation"].AsString();
-            const auto &name = pHandler->Payload()["name"].AsString();
-            const auto &path = pHandler->Payload()["path"].AsString();
+            const auto &operation = pHandler->Operation();
+            const auto &path = pHandler->Path();
+            const auto &name = pHandler->Name();
+
+            const auto &caPath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
+            const auto &caAbsoluteName = path_separator(caPath.back()) ? caPath + name : caPath + "/" + name;
+
+            pHandler->AbsoluteName() = caAbsoluteName;
 
             if (operation == "DELETE") {
-                const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
-
-                DeleteFile(caFileName);
+                DeleteFile(caAbsoluteName);
                 DeleteHandler(AHandler);
             } else {
                 CStringList SQL;
@@ -814,8 +843,8 @@ namespace Apostol {
                     const auto &caFile = pqResults[QUERY_INDEX_DATA].First();
 
                     const auto &type = caFile["type"];
-                    const auto &name = caFile["name"];
                     const auto &path = caFile["path"];
+                    const auto &name = caFile["name"];
                     const auto &date = caFile["date"];
                     const auto &data = caFile["data"];
 
@@ -825,26 +854,47 @@ namespace Apostol {
                         return;
                     }
 
-                    const auto &caFilePath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
-                    ForceDirectories(caFilePath.c_str(), 0755);
-                    const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + name : caFilePath + "/" + name;
-
-                    DeleteFile(caFileName);
+                    const auto &caPath = m_Path + (path_separator(path.front()) ? path.substr(1) : path);
+                    ForceDirectories(caPath.c_str(), 0755);
+                    const auto &caAbsoluteName = path_separator(caPath.back()) ? caPath + name : caPath + "/" + name;
 
                     if (type == "-") {
-                        Reply.Content = base64_decode(squeeze(data));
-                        Reply.Content.SaveToFile(caFileName.c_str());
+                        DeleteFile(caAbsoluteName);
 
-                        SendFile(AConnection, caFileName);
-                    } else if (type == "l") {
-                        auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
-                        pHandler->URI() = base64_decode(squeeze(data));
-                        pHandler->FileName() = caFileName;
-                        pHandler->Connection(AConnection);
-                        UnloadQueue();
-                    } else {
-                        ReplyError(AConnection, CHTTPReply::not_found, "Invalid file type");
+                        Reply.Content = base64_decode(squeeze(data));
+                        Reply.Content.SaveToFile(caAbsoluteName.c_str());
+
+                        SendFile(AConnection, caAbsoluteName);
+
+                        return;
+                    } else if (type == "l" || type == "s") {
+                        const auto &decode = base64_decode(squeeze(data));
+                        if ((decode.substr(0, 8) == FILE_SERVER_HTTPS || decode.substr(0, 7) == FILE_SERVER_HTTP)) {
+                            CString uri(decode);
+
+                            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
+
+                            if (type == 's') {
+                                uri += path;
+                                uri += name;
+                            }
+
+                            pHandler->URI() = uri;
+
+                            pHandler->AbsoluteName() = caAbsoluteName;
+                            pHandler->Connection(AConnection);
+                            UnloadQueue();
+
+                            return;
+                        } else if (decode == caAbsoluteName) {
+                            Reply.Content.LoadFromFile(caAbsoluteName.c_str());
+                            SendFile(AConnection, caAbsoluteName);
+
+                            return;
+                        }
                     }
+
+                    ReplyError(AConnection, CHTTPReply::not_found, "Not found");
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
@@ -866,9 +916,9 @@ namespace Apostol {
 
                     auto &Reply = AConnection->Reply();
 
-                    const auto &filename = AConnection->Data()["filename"];
+                    const auto &absolute_name = AConnection->Data()["absolute_name"];
 
-                    SendFile(AConnection, filename);
+                    SendFile(AConnection, absolute_name);
                 } catch (Delphi::Exception::Exception &E) {
                     ReplyError(AConnection, CHTTPReply::not_found, E.what());
                 } catch (std::exception &e) {
@@ -897,18 +947,18 @@ namespace Apostol {
                 sName += APOSTOL_INDEX_FILE;
             }
 
-            const auto &caFilePath = m_Path + (path_separator(Path.front()) ? Path.SubString(1) : Path);
-            const auto &caFileName = path_separator(caFilePath.back()) ? caFilePath + sName : caFilePath + "/" + sName;
+            const auto &caPath = m_Path + (path_separator(Path.front()) ? Path.SubString(1) : Path);
+            const auto &caAbsoluteName = path_separator(caPath.back()) ? caPath + sName : caPath + "/" + sName;
 
+            pConnection->Data().AddPair("path", caPath);
             pConnection->Data().AddPair("name", sName);
-            pConnection->Data().AddPair("filepath", caFilePath);
-            pConnection->Data().AddPair("filename", caFileName);
+            pConnection->Data().AddPair("absolute_name", caAbsoluteName);
 
             CStringList SQL;
 
-            if (FileExists(caFileName.c_str())) {
+            if (FileExists(caAbsoluteName.c_str())) {
                 if (Session == m_Session) {
-                    SendFile(pConnection, caFileName);
+                    SendFile(pConnection, caAbsoluteName);
                     DeleteHandler(AHandler);
                 } else {
                     api::authorize(SQL, Session);
@@ -1014,12 +1064,10 @@ namespace Apostol {
             }
 
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
-            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", Session.c_str()), [this](auto &&Handler) { DoGetFile(Handler); });
+            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), [this](auto &&Handler) { DoGetFile(Handler); });
 #else
-            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", Session.c_str()), std::bind(&CFileServer::DoFile, this, _1));
+            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), std::bind(&CFileServer::DoFile, this, _1));
 #endif
-            pHandler->Path() = sPath;
-            pHandler->Name() = sName;
             pHandler->Connection(AConnection);
 
             UnloadQueue();

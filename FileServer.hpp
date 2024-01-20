@@ -68,16 +68,20 @@ namespace Apostol {
         class CFileHandler: public CQueueHandler {
         private:
 
-            CString m_Session;
-            CString m_FileId;
-
             CJSON m_Payload;
 
             CLocation m_URI;
 
+            CString m_Session;
+            CString m_FileId;
+            CString m_Operation;
+            CString m_Type;
             CString m_Path;
             CString m_Name;
-            CString m_FileName;
+            CString m_Hash;
+            CString m_Done;
+            CString m_Fail;
+            CString m_AbsoluteName;
 
             CFileServerThread *m_pThread;
             CHTTPServerConnection *m_pConnection;
@@ -88,23 +92,28 @@ namespace Apostol {
 
             CFileHandler(CQueueCollection *ACollection, const CString &Data, COnQueueHandlerEvent && Handler);
 
-            const CString &Session() const { return m_Session; }
-            const CString &FileId() const { return m_FileId; }
-
             CJSON &Payload() { return m_Payload; }
             const CJSON &Payload() const { return m_Payload; }
 
             CLocation &URI() { return m_URI; }
             const CLocation &URI() const { return m_URI; }
 
-            CString &Path() { return m_Path; }
+            const CString &Session() const { return m_Session; }
+            const CString &Operation() const { return m_Operation; }
+            const CString &FileId() const { return m_FileId; }
+            const CString &Type() const { return m_Type; }
             const CString &Path() const { return m_Path; }
-
-            CString &Name() { return m_Name; }
             const CString &Name() const { return m_Name; }
+            const CString &Hash() const { return m_Hash; }
 
-            CString &FileName() { return m_FileName; }
-            const CString &FileName() const { return m_FileName; }
+            CString &Done() { return m_Done; }
+            const CString &Done() const { return m_Done; }
+
+            CString &Fail() { return m_Fail; }
+            const CString &Fail() const { return m_Fail; }
+
+            CString &AbsoluteName() { return m_AbsoluteName; }
+            const CString &AbsoluteName() const { return m_AbsoluteName; }
 
             CFileServerThread *Thread() const { return m_pThread; };
             void SetThread(CFileServerThread *AThread) { m_pThread = AThread; };
