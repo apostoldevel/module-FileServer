@@ -293,10 +293,18 @@ namespace Apostol {
 
             auto pHandler = dynamic_cast<CFileHandler *> (AHandler);
 
+            if (pHandler == nullptr)
+                return;
+
             AHandler->Allow(false);
             IncProgress();
 
             auto pConnection = pHandler->Connection();
+
+            if (!(pConnection != nullptr && pConnection->Connected())) {
+                DeleteHandler(pHandler);
+                return;
+            }
 
             const CString Session(pHandler->Session());
             const CString Path(pHandler->Path());
@@ -384,8 +392,10 @@ namespace Apostol {
 
 #if defined(_GLIBCXX_RELEASE) && (_GLIBCXX_RELEASE >= 9)
             auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), [this](auto &&Handler) { DoGetFile(Handler); });
+            AConnection->OnDisconnected([this](auto &&Sender) { DoDisconnected(Sender); });
 #else
             auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), std::bind(&CFileServer::DoFile, this, _1));
+            AConnection->OnDisconnected(std::bind(&CFileServer::DoDisconnected, this, _1));
 #endif
             pHandler->Connection(AConnection);
 
@@ -406,6 +416,25 @@ namespace Apostol {
             }
 
             MethodNotAllowed(AConnection);
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
+        void CFileServer::DoDisconnected(CObject *Sender) {
+            auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
+            if (Assigned(pConnection)) {
+                auto pHandler = dynamic_cast<CFileHandler *> (pConnection->Binding());
+                if (Assigned(pHandler))
+                    pHandler->Connection(nullptr);
+                auto pSocket = pConnection->Socket();
+                if (pSocket != nullptr) {
+                    auto pHandle = pSocket->Binding();
+                    if (Assigned(pHandle)) {
+                        Log()->Notice(_T("[FileServer] [%s:%d] Client disconnected."), pHandle->PeerIP(), pHandle->PeerPort());
+                    }
+                } else {
+                    Log()->Notice(_T("[FileServer] Client disconnected."));
+                }
+            }
         }
         //--------------------------------------------------------------------------------------------------------------
 

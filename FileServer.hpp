@@ -49,6 +49,8 @@ namespace Apostol {
 
             CString VerifyToken(const CString &Token);
 
+            static void DoDisconnected(CObject *Sender);
+
         protected:
 
             void DoGetFile(CQueueHandler *AHandler);
