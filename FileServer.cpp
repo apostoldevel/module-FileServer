@@ -233,7 +233,13 @@ namespace Apostol {
                         if ((decode.substr(0, 8) == FILE_COMMON_HTTPS || decode.substr(0, 7) == FILE_COMMON_HTTP)) {
                             CString uri(decode);
 
-                            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) { DoLink(Handler); });
+                            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) {
+                                if (m_Type == "curl") {
+                                    DoLink(Handler);
+                                } else {
+                                    DoFetch(Handler);
+                                }
+                            });
 
                             if (type == 's') {
                                 uri += path;
@@ -420,6 +426,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::DoDisconnected(CObject *Sender) {
+            CLockGuard Lock(&GFileThreadLock);
             auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (Assigned(pConnection)) {
                 auto pHandler = dynamic_cast<CFileHandler *> (pConnection->Binding());
@@ -445,6 +452,7 @@ namespace Apostol {
             }
 
             UnloadQueue();
+            CheckTimeOut(Now);
         }
         //--------------------------------------------------------------------------------------------------------------
 
