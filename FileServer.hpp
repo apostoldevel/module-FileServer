@@ -49,7 +49,7 @@ namespace Apostol {
 
             CString VerifyToken(const CString &Token);
 
-            static void DoDisconnected(CObject *Sender);
+            void DoDisconnected(CObject *Sender);
 
         protected:
 

@@ -235,9 +235,9 @@ namespace Apostol {
 
                             auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s"})", m_Session.c_str()), [this](auto &&Handler) {
                                 if (m_Type == "curl") {
-                                    DoLink(Handler);
+                                    DoCURL(dynamic_cast<CFileHandler *> (Handler));
                                 } else {
-                                    DoFetch(Handler);
+                                    DoFetch(dynamic_cast<CFileHandler *> (Handler));
                                 }
                             });
 
@@ -426,7 +426,6 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         void CFileServer::DoDisconnected(CObject *Sender) {
-            CLockGuard Lock(&GFileThreadLock);
             auto pConnection = dynamic_cast<CHTTPServerConnection *>(Sender);
             if (Assigned(pConnection)) {
                 auto pHandler = dynamic_cast<CFileHandler *> (pConnection->Binding());
@@ -436,10 +435,10 @@ namespace Apostol {
                 if (pSocket != nullptr) {
                     auto pHandle = pSocket->Binding();
                     if (Assigned(pHandle)) {
-                        Log()->Notice(_T("[FileServer] [%s:%d] Client disconnected."), pHandle->PeerIP(), pHandle->PeerPort());
+                        Log()->Notice(_T("[%s] [%s:%d] Client disconnected."), ModuleName().c_str(), pHandle->PeerIP(), pHandle->PeerPort());
                     }
                 } else {
-                    Log()->Notice(_T("[FileServer] Client disconnected."));
+                    Log()->Notice(_T("[%s] Client disconnected."), ModuleName().c_str());
                 }
             }
         }
