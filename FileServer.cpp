@@ -400,7 +400,7 @@ namespace Apostol {
             auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), [this](auto &&Handler) { DoGetFile(Handler); });
             AConnection->OnDisconnected([this](auto &&Sender) { DoDisconnected(Sender); });
 #else
-            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), std::bind(&CFileServer::DoFile, this, _1));
+            auto pHandler = new CFileHandler(this, CString().Format(R"({"session": "%s", "path": "%s", "name": "%s"})", Session.c_str(), sPath.c_str(), sName.c_str()), std::bind(&CFileServer::DoGetFile, this, _1));
             AConnection->OnDisconnected(std::bind(&CFileServer::DoDisconnected, this, _1));
 #endif
             pHandler->Connection(AConnection);
