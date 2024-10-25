@@ -455,6 +455,14 @@ namespace Apostol {
         }
         //--------------------------------------------------------------------------------------------------------------
 
+        void CFileServer::Initialization(CModuleProcess *AProcess) {
+            CFileCommon::Initialization(AProcess);
+            Config()->IniFile().ReadSectionValues(CString().Format("%s/endpoints", SectionName()).c_str(), &m_EndPoints);
+            if (m_EndPoints.Count() == 0)
+                m_EndPoints.Add("/file/*");
+        }
+        //--------------------------------------------------------------------------------------------------------------
+
         bool CFileServer::Enabled() {
             if (m_ModuleStatus == msUnknown)
                 m_ModuleStatus = Config()->IniFile().ReadBool(SectionName().c_str(), "enable", true) ? msEnabled : msDisabled;
@@ -463,7 +471,7 @@ namespace Apostol {
         //--------------------------------------------------------------------------------------------------------------
 
         bool CFileServer::CheckLocation(const CLocation &Location) {
-            return Location.pathname.SubString(0, 6) == _T("/file/");
+            return AllowedLocation(Location.pathname, m_EndPoints);
         }
         //--------------------------------------------------------------------------------------------------------------
     }

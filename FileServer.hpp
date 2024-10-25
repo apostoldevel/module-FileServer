@@ -42,6 +42,8 @@ namespace Apostol {
         class CFileServer: public CFileCommon {
         private:
 
+            CStringList m_EndPoints;
+
             void InitMethods() override;
 
             static CString GetSession(const CHTTPRequest &Request);
@@ -67,6 +69,8 @@ namespace Apostol {
             static class CFileServer *CreateModule(CModuleProcess *AProcess) {
                 return new CFileServer(AProcess);
             }
+
+            void Initialization(CModuleProcess *AProcess) override;
 
             void Heartbeat(CDateTime Now) override;
 
