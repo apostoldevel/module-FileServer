@@ -42,7 +42,7 @@ namespace Apostol {
         class CFileServer: public CFileCommon {
         private:
 
-            CStringList m_EndPoints;
+            CStringListPairs m_Profiles;
 
             void InitMethods() override;
 
@@ -52,6 +52,8 @@ namespace Apostol {
             CString VerifyToken(const CString &Token);
 
             void DoDisconnected(CObject *Sender);
+
+            static void InitConfig(const CIniFile &IniFile, const CString &Section, CStringList &Config);
 
         protected:
 
