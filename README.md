@@ -1,35 +1,58 @@
-Файл сервер
--
-**Модуль** для [Апостол CRM](https://github.com/apostoldevel/apostol-crm).
+[![ru](https://img.shields.io/badge/lang-ru-green.svg)](README.ru-RU.md)
 
-Описание
+File Server
 -
-* Сервер для получения [файлов объекта](https://github.com/apostoldevel/db-platform/wiki/%D0%A4%D0%B0%D0%B9%D0%BB%D1%8B-%D0%BE%D0%B1%D1%8A%D0%B5%D0%BA%D1%82%D0%B0) хранящихся в СУБД по прямой ссылке (URL).
-* Доступ к файлам предоставляется согласно правам пользователя.
-* Запрос должен быть выполнен в соответствии с правилами [доступа к API](https://github.com/apostoldevel/db-platform/wiki/%D0%94%D0%BE%D1%81%D1%82%D1%83%D0%BF-%D0%BA-API).
+**FileServer** is a module for [Apostol](https://github.com/apostoldevel/apostol).
 
-Формат URL:
-````
+Description
+-
+**FileServer** serves files stored in the database (via the `file` module of [db-platform](https://github.com/apostoldevel/db-platform)) over HTTP using a direct URL. Access is controlled by user permissions. Requests must comply with the [API access rules](https://github.com/apostoldevel/db-platform/wiki).
+
+> **FileServer** and **PGFile** are complementary modules that share the `FileCommon` base class. PGFile syncs files from the database to the local filesystem; FileServer serves those files over HTTP.
+
+How it works
+-
+1. An HTTP `GET` request arrives at `/file/<uuid>[/<path>][/<name>]`.
+2. The module authenticates the request (Bearer JWT token or session-based authorization).
+3. It fetches the file record from the database via `api.get_file(id)`, which checks user permissions.
+4. The file content is read from the local filesystem and sent as an HTTP response with the correct `Content-Type`.
+
+URL format
+-
+```
 http[s]://localhost:8080/file/<uuid>[/<path>][/<name>]
-````
-* Где:
-    -  `<uuid>` - **Обязательный**. Идентификатор объекта;
-    -  `<path>` - **Необязательный**. Путь к файлу.
-    -  `<name>` - **Необязательный**. Наименование файла. По умолчанию: `index.html`.
+```
 
-Пример:
-````http request
+| Parameter | Required | Description |
+|-----------|:--------:|-------------|
+| `<uuid>`  | Yes | Object identifier |
+| `<path>`  | No  | File path within the object |
+| `<name>`  | No  | File name. Defaults to `index.html` |
+
+Examples
+-
+Fetch the default file for an object:
+
+```http
 GET /file/5179f20f-8f17-443c-897c-57c829130b9c HTTP/1.1
 Host: localhost:8080
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiIDogImFjY291bnRzLnNoaXAtc2FmZXR5LnJ1IiwgImF1ZCIgOiAid2ViLXNoaXAtc2FmZXR5LnJ1IiwgInN1YiIgOiAiZGZlMDViNzhhNzZiNmFkOGUwZmNiZWYyNzA2NzE3OTNiODZhYTg0OCIsICJpYXQiIDogMTU5MzUzMjExMCwgImV4cCIgOiAxNTkzNTM1NzEwfQ.NorYsi-Ht826HUFCEArVZ60_dEUmYiJYXubnTyweIMg
-````
+Authorization: Bearer <access_token>
+```
 
-````http request
-GET /file/5179f20f-8f17-443c-897c-57c829130b9c/doc/file.pdf HTTP/1.1
+Fetch a specific file by path and name:
+
+```http
+GET /file/5179f20f-8f17-443c-897c-57c829130b9c/doc/report.pdf HTTP/1.1
 Host: localhost:8080
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiIDogImFjY291bnRzLnNoaXAtc2FmZXR5LnJ1IiwgImF1ZCIgOiAid2ViLXNoaXAtc2FmZXR5LnJ1IiwgInN1YiIgOiAiZGZlMDViNzhhNzZiNmFkOGUwZmNiZWYyNzA2NzE3OTNiODZhYTg0OCIsICJpYXQiIDogMTU5MzUzMjExMCwgImV4cCIgOiAxNTkzNTM1NzEwfQ.NorYsi-Ht826HUFCEArVZ60_dEUmYiJYXubnTyweIMg
-````
+Authorization: Bearer <access_token>
+```
 
-Установка
+Related modules
 -
-Следуйте указаниям по сборке и установке [Апостол](https://github.com/apostoldevel/apostol-crm#%D1%81%D0%B1%D0%BE%D1%80%D0%BA%D0%B0-%D0%B8-%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B0)
+- **PGFile** — populates the filesystem: listens to PostgreSQL NOTIFY and writes files to disk when `db.file` records change
+- **db-platform `file` module** — database layer: `db.file` table, UNIX-like permissions, `api.get_file`, REST endpoints
+- **FileCommon** (`src/common/FileCommon`) — shared C++ base class: authentication, queue, `CFileHandler`, cURL support
+
+Installation
+-
+Follow the build and installation instructions for [Apostol](https://github.com/apostoldevel/apostol#build-and-installation).
