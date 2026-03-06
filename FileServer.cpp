@@ -12,7 +12,6 @@
 #include "apostol/pg_utils.hpp"
 
 #include <fmt/format.h>
-#include <fstream>
 
 namespace apostol
 {
@@ -31,15 +30,11 @@ FileServer::FileServer(Application& app)
                 if (e.is_string()) endpoints_.push_back(e.get<std::string>());
         if (cfg->contains("path"))
             files_path_ = app.resolve_path((*cfg)["path"].get<std::string>(), "files");
-        if (cfg->contains("timeout") && (*cfg)["timeout"].is_number())
-            timeout_secs_ = (*cfg)["timeout"].get<int>();
     }
     if (endpoints_.empty())
         endpoints_.push_back("/file/*");
     if (files_path_.empty())
         files_path_ = app.resolve_path("", "files");
-    if (timeout_secs_ <= 0)
-        timeout_secs_ = 60;
 
     // Load OAuth2 "service" credentials for bot session (/public/* paths)
     auto [cid, csecret] = app.providers().credentials("service");
@@ -134,9 +129,12 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 
     auto local_path = files_path_ / rel_path / name;
 
-    // Fast path: file exists on disk
+    // Fast path: file exists on disk — sendfile(2) zero-copy
     if (std::filesystem::exists(local_path)) {
-        serve_local_file(local_path, resp);
+        resp.set_deferred(true);
+        auto conn = std::static_pointer_cast<HttpConnection>(req.connection_ctx);
+        auto ext = local_path.extension().string();
+        conn->send_file(local_path.string(), file_mime_type(ext));
         return;
     }
 
@@ -226,25 +224,6 @@ FileServer::parse_file_path(std::string_view url_path)
     return {path, name};
 }
 
-// ─── serve_local_file ───────────────────────────────────────────────────────
-
-void FileServer::serve_local_file(const std::filesystem::path& path,
-                                  HttpResponse& resp)
-{
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) {
-        reply_error(resp, HttpStatus::not_found, "file not readable");
-        return;
-    }
-
-    std::string content((std::istreambuf_iterator<char>(f)), {});
-    auto ext = path.extension().string();
-    auto mime = std::string(file_mime_type(ext));
-
-    resp.set_status(HttpStatus::ok)
-        .set_body(std::move(content), mime);
-}
-
 // ─── fetch_and_serve ────────────────────────────────────────────────────────
 //
 // Deferred response: query PG for file, decode, write to disk, send to client.
@@ -271,6 +250,8 @@ void FileServer::fetch_and_serve(std::string_view session,
     pool_.execute(sql,
         [conn, files_path, path = std::string(path),
          name = std::string(name)](std::vector<PgResult> results) {
+            if (conn->closed()) return;
+
             HttpResponse r;
 
             // results[0] = authorize, results[1] = get_file
@@ -347,21 +328,15 @@ void FileServer::fetch_and_serve(std::string_view session,
                         reply_error(r, HttpStatus::not_found, "file not cached locally");
                         conn->send_response(r);
                     } else {
-                        // Local path reference — try to serve it
+                        // Local path reference — sendfile(2) zero-copy
                         auto ref_path = std::filesystem::path(decoded);
                         if (std::filesystem::exists(ref_path)) {
-                            std::ifstream f(ref_path, std::ios::binary);
-                            if (f.is_open()) {
-                                std::string content((std::istreambuf_iterator<char>(f)), {});
-                                if (mime.empty()) {
-                                    auto ext = ref_path.extension().string();
-                                    mime = std::string(file_mime_type(ext));
-                                }
-                                r.set_status(HttpStatus::ok)
-                                 .set_body(std::move(content), mime);
-                                conn->send_response(r);
-                                return;
+                            if (mime.empty()) {
+                                auto ext = ref_path.extension().string();
+                                mime = std::string(file_mime_type(ext));
                             }
+                            conn->send_file(ref_path.string(), mime);
+                            return;
                         }
                         reply_error(r, HttpStatus::not_found, "referenced file not found");
                         conn->send_response(r);
@@ -377,6 +352,7 @@ void FileServer::fetch_and_serve(std::string_view session,
         },
         // on_exception — uses free reply_error (with json_escape, fixing the security bug)
         [conn](std::string_view error) {
+            if (conn->closed()) return;
             HttpResponse r;
             reply_error(r, HttpStatus::internal_server_error, error);
             conn->send_response(r);

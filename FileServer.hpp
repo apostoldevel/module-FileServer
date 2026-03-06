@@ -60,10 +60,6 @@ private:
     /// Parse "/file/some/path/filename.ext" → {path="/some/path/", name="filename.ext"}
     static std::pair<std::string, std::string> parse_file_path(std::string_view url_path);
 
-    /// Serve a local file: set 200 + MIME type + body.
-    static void serve_local_file(const std::filesystem::path& path,
-                                 HttpResponse& resp);
-
     /// Async: DB query → decode → write to disk → send response.
     void fetch_and_serve(std::string_view session,
                          std::string_view name, std::string_view path,
@@ -74,7 +70,6 @@ private:
     std::filesystem::path files_path_;
     const OAuthProviders& providers_;
     std::vector<std::string> endpoints_;
-    int                   timeout_secs_;
     bool                  enabled_;
     std::string           client_id_;
     std::string           client_secret_;
