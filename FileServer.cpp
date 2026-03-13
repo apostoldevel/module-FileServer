@@ -19,8 +19,8 @@ namespace apostol
 // ─── Construction ────────────────────────────────────────────────────────────
 
 FileServer::FileServer(Application& app)
-    : pool_(app.db_pool())
-    , bot_(app.db_pool(), "FileServer/2.0", "127.0.0.1")
+    : pool_(app.db_pool("helper"))
+    , bot_(app.db_pool("helper"), "FileServer/2.0", "127.0.0.1")
     , providers_(app.providers())
     , enabled_(true)
 {
