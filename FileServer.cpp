@@ -154,27 +154,23 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 std::string FileServer::check_auth(const HttpRequest& req, HttpResponse& resp)
 {
     // Try Authorization header first
-    auto auth = req.header("Authorization");
-    if (!auth.empty()) {
-        // Bearer token
-        if (auth.size() > 7 && auth.substr(0, 7) == "Bearer ") {
-            auto token = auth.substr(7);
-            try {
-                auto claims = verify_jwt(token, providers_);
-                if (!claims.sub.empty())
-                    return claims.sub;
-                reply_error(resp, HttpStatus::unauthorized, "missing subject in token");
-                return {};
-            } catch (const JwtExpiredError&) {
-                reply_error(resp, HttpStatus::forbidden, "token expired");
-                return {};
-            } catch (const JwtVerificationError& e) {
-                reply_error(resp, HttpStatus::unauthorized, e.what());
-                return {};
-            } catch (const std::exception& e) {
-                reply_error(resp, HttpStatus::bad_request, e.what());
-                return {};
-            }
+    auto authorization = parse_authorization(req.header("Authorization"));
+    if (authorization.schema == Authorization::Schema::bearer) {
+        try {
+            auto claims = verify_jwt(authorization.token, providers_);
+            if (!claims.sub.empty())
+                return claims.sub;
+            reply_error(resp, HttpStatus::unauthorized, "missing subject in token");
+            return {};
+        } catch (const JwtExpiredError&) {
+            reply_error(resp, HttpStatus::forbidden, "token expired");
+            return {};
+        } catch (const JwtVerificationError& e) {
+            reply_error(resp, HttpStatus::unauthorized, e.what());
+            return {};
+        } catch (const std::exception& e) {
+            reply_error(resp, HttpStatus::bad_request, e.what());
+            return {};
         }
     }
 
