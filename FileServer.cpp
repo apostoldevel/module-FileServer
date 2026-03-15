@@ -130,7 +130,8 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
     auto local_path = files_path_ / rel_path / name;
 
     // Fast path: file exists on disk — sendfile(2) zero-copy
-    if (std::filesystem::exists(local_path)) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(local_path, ec) && !ec) {
         resp.set_deferred(true);
         auto conn = std::static_pointer_cast<HttpConnection>(req.connection_ctx);
         auto ext = local_path.extension().string();
@@ -323,10 +324,11 @@ void FileServer::fetch_and_serve(std::string_view session,
                         decoded.substr(0, 7) == "http://") {
                         reply_error(r, HttpStatus::not_found, "file not cached locally");
                         conn->send_response(r);
-                    } else {
+                    } else if (is_safe_path(decoded)) {
                         // Local path reference — sendfile(2) zero-copy
                         auto ref_path = std::filesystem::path(decoded);
-                        if (std::filesystem::exists(ref_path)) {
+                        std::error_code ec;
+                        if (std::filesystem::is_regular_file(ref_path, ec) && !ec) {
                             if (mime.empty()) {
                                 auto ext = ref_path.extension().string();
                                 mime = std::string(file_mime_type(ext));
