@@ -89,7 +89,9 @@ void FileServer::init_methods()
 
 void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 {
-    auto req_path = req.path;
+    // llhttp stores req.path percent-encoded; decode before filesystem/DB lookup
+    // so non-ASCII names (e.g. Cyrillic) resolve correctly.
+    auto req_path = url_decode(req.path);
 
     // Safety check
     if (!is_safe_path(req_path)) {
