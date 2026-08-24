@@ -29,7 +29,7 @@ class Application;
 //     → check_location("/file/*")
 //     → parse_file_path() → {path="/some/path/", name="document.pdf"}
 //     → /public/* uses bot session (no user auth)
-//     → other paths: check_auth() (JWT Bearer / Session header / SID cookie)
+//     → other paths: check_auth() (JWT Bearer / Session header / __Host-SID cookie)
 //     → fast path: file exists on disk → serve directly
 //     → slow path: PG query → decode → write → serve (deferred response)
 //
@@ -50,7 +50,7 @@ protected:
     void init_methods() override;
 
 private:
-    /// Extract session from JWT Bearer / Session header / SID cookie.
+    /// Extract session from JWT Bearer / Session header / __Host-SID cookie.
     /// Returns empty string on auth failure (response already set).
     std::string check_auth(const HttpRequest& req, HttpResponse& resp);
 

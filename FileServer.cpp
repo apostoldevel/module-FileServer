@@ -152,7 +152,7 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 // Mirrors v1 CFileServer::CheckAuthorization():
 //   1. Authorization: Bearer <jwt> → verify_jwt() → sub = session
 //   2. Session: <uuid> header → session = uuid
-//   3. Cookie SID=<uuid> → session = uuid
+//   3. Cookie __Host-SID=<uuid> → session = uuid
 
 std::string FileServer::check_auth(const HttpRequest& req, HttpResponse& resp)
 {
@@ -182,8 +182,11 @@ std::string FileServer::check_auth(const HttpRequest& req, HttpResponse& resp)
     if (!session_hdr.empty())
         return session_hdr;
 
-    // Try SID cookie
-    auto sid = req.cookie("SID");
+    // Try the session cookie. The name carries the __Host- prefix on purpose — see
+    // module-AuthServer, which mints it: the value is trusted without a signature, and
+    // the prefix is what keeps a sibling subdomain from planting one. The old bare
+    // "SID" is not read.
+    auto sid = req.cookie("__Host-SID");
     if (!sid.empty())
         return sid;
 
