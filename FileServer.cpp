@@ -249,6 +249,9 @@ void FileServer::fetch_and_serve(std::string_view session,
     // Capture what we need for the async callback
     auto files_path = files_path_;
 
+    // quiet: the statement carries a session code. PgPool prints statement
+    // text at debug into postgres.log — inside the container, readable
+    // by any process there.
     pool_.execute(sql,
         [conn, files_path, path = std::string(path),
          name = std::string(name)](std::vector<PgResult> results) {
@@ -359,7 +362,8 @@ void FileServer::fetch_and_serve(std::string_view session,
             HttpResponse r;
             reply_error(r, HttpStatus::internal_server_error, error);
             conn->send_response(r);
-        });
+        },
+        /*quiet=*/true);
 }
 
 } // namespace apostol
