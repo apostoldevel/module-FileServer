@@ -30,8 +30,12 @@ class Application;
 //     → parse_file_path() → {path="/some/path/", name="document.pdf"}
 //     → /public/* uses bot session (no user auth)
 //     → other paths: check_auth() (JWT Bearer / Session header / __Host-SID cookie)
-//     → fast path: file exists on disk → serve directly
-//     → slow path: PG query → decode → write → serve (deferred response)
+//     → file on disk, bot session → sendfile directly
+//     → file on disk, user session → api.authorize() → sendfile (deferred)
+//     → otherwise: api.authorize() + api.get_file() → decode → write → serve (deferred)
+//
+// Nothing leaves the disk on a user session before the database has confirmed it:
+// api.authorize() is the only barrier this module has, and its result is binding.
 //
 class FileServer final : public ApostolModule
 {
@@ -51,6 +55,8 @@ protected:
 
 private:
     /// Extract session from JWT Bearer / Session header / __Host-SID cookie.
+    /// A header/cookie session is accepted only at its exact length (40); the
+    /// value is still unverified here — api.authorize() decides.
     /// Returns empty string on auth failure (response already set).
     std::string check_auth(const HttpRequest& req, HttpResponse& resp);
 
@@ -60,10 +66,19 @@ private:
     /// Parse "/file/some/path/filename.ext" → {path="/some/path/", name="filename.ext"}
     static std::pair<std::string, std::string> parse_file_path(std::string_view url_path);
 
+    /// Async: api.authorize() only, then sendfile(2) of a file already on disk.
+    void authorize_and_serve(std::string_view session,
+                             std::filesystem::path local_path,
+                             std::shared_ptr<void> conn_ctx);
+
     /// Async: DB query → decode → write to disk → send response.
     void fetch_and_serve(std::string_view session,
                          std::string_view name, std::string_view path,
                          std::shared_ptr<void> conn_ctx);
+
+    /// True when the api.authorize() result says authorized = 't';
+    /// otherwise fills `message` from the row. Expects a successful result.
+    static bool authorized(const PgResult& res, std::string& message);
 
     PgPool&               pool_;
     BotSession            bot_;

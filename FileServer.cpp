@@ -80,12 +80,13 @@ void FileServer::init_methods()
 
 // ─── do_get ─────────────────────────────────────────────────────────────────
 //
-// Mirrors v1 CFileServer::DoGet():
+// Mirrors v1 CFileServer::DoGet() + DoGetFile():
 //   1. Parse path → {dir, filename}
 //   2. /public/* → use bot session
 //   3. Other → check_auth()
-//   4. If file exists on disk → serve directly
-//   5. Otherwise → deferred PG query
+//   4. File on disk: bot session → serve directly;
+//      user session → api.authorize() first, serve on 't' (deferred)
+//   5. Otherwise → deferred PG query (authorize + get_file)
 
 void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 {
@@ -108,8 +109,9 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 
     // Determine session
     std::string session;
+    const bool is_public = path.substr(0, 8) == "/public/";
 
-    if (path.substr(0, 8) == "/public/") {
+    if (is_public) {
         // Public path — use bot session
         session = bot_.session();
         if (session.empty()) {
@@ -131,17 +133,23 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 
     auto local_path = files_path_ / rel_path / name;
 
-    // Fast path: file exists on disk — sendfile(2) zero-copy
+    // File already on disk — sendfile(2) zero-copy. Only the module's own
+    // (public) session skips the database: a user session is a bare string
+    // until api.authorize() has said 't' (v1 CFileServer::DoGetFile, OnContinue).
     std::error_code ec;
     if (std::filesystem::is_regular_file(local_path, ec) && !ec) {
         resp.set_deferred(true);
-        auto conn = std::static_pointer_cast<HttpConnection>(req.connection_ctx);
-        auto ext = local_path.extension().string();
-        conn->send_file(local_path.string(), file_mime_type(ext));
+        if (is_public) {
+            auto conn = std::static_pointer_cast<HttpConnection>(req.connection_ctx);
+            auto ext = local_path.extension().string();
+            conn->send_file(local_path.string(), file_mime_type(ext));
+        } else {
+            authorize_and_serve(session, std::move(local_path), req.connection_ctx);
+        }
         return;
     }
 
-    // Slow path: query PG for file data (deferred response)
+    // Not cached: query PG for file data (deferred response)
     resp.set_deferred(true);
 
     fetch_and_serve(session, name, path, req.connection_ctx);
@@ -151,8 +159,8 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 //
 // Mirrors v1 CFileServer::CheckAuthorization():
 //   1. Authorization: Bearer <jwt> → verify_jwt() → sub = session
-//   2. Session: <uuid> header → session = uuid
-//   3. Cookie __Host-SID=<uuid> → session = uuid
+//   2. Session: <code> header → session = code (exactly 40 chars)
+//   3. Cookie __Host-SID=<code> → session = code (exactly 40 chars)
 
 std::string FileServer::check_auth(const HttpRequest& req, HttpResponse& resp)
 {
@@ -177,18 +185,20 @@ std::string FileServer::check_auth(const HttpRequest& req, HttpResponse& resp)
         }
     }
 
-    // Try Session header
-    auto session_hdr = req.header("Session");
-    if (!session_hdr.empty())
-        return session_hdr;
+    // Session header, then the session cookie. The cookie name carries the __Host-
+    // prefix on purpose — see module-AuthServer, which mints it: the value is not
+    // signed, and the prefix is what keeps a sibling subdomain from planting one.
+    // The old bare "SID" is not read.
+    //
+    // Either one is accepted only at the exact length of a session code (v1
+    // CFileServer::CheckAuthorizationData) — and even then it is only a candidate:
+    // the database verifies it in api.authorize() before any byte is served.
+    std::string session = req.header("Session");
+    if (session.empty())
+        session = req.cookie("__Host-SID");
 
-    // Try the session cookie. The name carries the __Host- prefix on purpose — see
-    // module-AuthServer, which mints it: the value is trusted without a signature, and
-    // the prefix is what keeps a sibling subdomain from planting one. The old bare
-    // "SID" is not read.
-    auto sid = req.cookie("__Host-SID");
-    if (!sid.empty())
-        return sid;
+    if (session.size() == 40)
+        return session;
 
     reply_error(resp, HttpStatus::unauthorized, "Unauthorized");
     return {};
@@ -226,12 +236,81 @@ FileServer::parse_file_path(std::string_view url_path)
     return {path, name};
 }
 
+// ─── authorized ─────────────────────────────────────────────────────────────
+//
+// api.authorize(session) → (authorized boolean, userid uuid, message text).
+// The result is binding: anything but 't' means the file is not served.
+// A failed statement never reaches here — with on_exception set, PgPool routes
+// it to the error handler (500); a missing result is the caller's 500 too.
+
+bool FileServer::authorized(const PgResult& res, std::string& message)
+{
+    if (res.rows() == 0) {
+        message = "authorize returned no row";
+        return false;
+    }
+    int idx = res.column_index("authorized");
+    const char* v = idx >= 0 ? res.value(0, idx) : nullptr;
+    if (v && v[0] == 't')
+        return true;
+
+    int midx = res.column_index("message");
+    const char* m = midx >= 0 ? res.value(0, midx) : nullptr;
+    message = (m && m[0] != '\0') ? m : "Authorization failed";
+    return false;
+}
+
+// ─── authorize_and_serve ────────────────────────────────────────────────────
+//
+// Mirrors v1 CFileServer::DoGetFile() → OnContinue: the file is cached on disk,
+// but the session is a user's — ask the database first, sendfile(2) on 't'.
+
+void FileServer::authorize_and_serve(std::string_view session,
+                                     std::filesystem::path local_path,
+                                     std::shared_ptr<void> conn_ctx)
+{
+    auto conn = std::static_pointer_cast<HttpConnection>(conn_ctx);
+
+    auto sql = fmt::format("SELECT * FROM api.authorize({})",
+                           pq_quote_literal(std::string(session)));
+
+    // quiet: the statement carries a session code (see fetch_and_serve).
+    pool_.execute(sql,
+        [conn, local_path = std::move(local_path)](std::vector<PgResult> results) {
+            if (conn->closed()) return;
+
+            HttpResponse r;
+
+            if (results.empty() || !results[0].ok()) {
+                reply_error(r, HttpStatus::internal_server_error, "authorize returned no result");
+                conn->send_response(r);
+                return;
+            }
+
+            std::string why;
+            if (!authorized(results[0], why)) {
+                reply_error(r, HttpStatus::unauthorized, why);
+                conn->send_response(r);
+                return;
+            }
+
+            auto ext = local_path.extension().string();
+            conn->send_file(local_path.string(), file_mime_type(ext));
+        },
+        [conn](std::string_view error) {
+            if (conn->closed()) return;
+            HttpResponse r;
+            reply_error(r, HttpStatus::internal_server_error, error);
+            conn->send_response(r);
+        },
+        /*quiet=*/true);
+}
+
 // ─── fetch_and_serve ────────────────────────────────────────────────────────
 //
 // Deferred response: query PG for file, decode, write to disk, send to client.
-// Uses exec_sql() which handles set_deferred + on_exception automatically.
-// NOTE: we use pool_.execute() directly here because exec_sql sets deferred=true,
-// but do_get() already set it, and we need the raw pool for a 2-statement SQL.
+// pool_.execute() directly, not exec_sql(): do_get() has already set deferred,
+// and the statement is a 2-statement SQL (authorize + get_file).
 
 void FileServer::fetch_and_serve(std::string_view session,
                                  std::string_view name, std::string_view path,
@@ -259,7 +338,22 @@ void FileServer::fetch_and_serve(std::string_view session,
 
             HttpResponse r;
 
-            // results[0] = authorize, results[1] = get_file
+            // results[0] = authorize, results[1] = get_file.
+            // The authorize result is binding (v1 CFileServer::DoGetFile):
+            // anything but 't' and the file row is never looked at.
+            if (results.empty() || !results[0].ok()) {
+                reply_error(r, HttpStatus::internal_server_error, "authorize returned no result");
+                conn->send_response(r);
+                return;
+            }
+
+            std::string why;
+            if (!authorized(results[0], why)) {
+                reply_error(r, HttpStatus::unauthorized, why);
+                conn->send_response(r);
+                return;
+            }
+
             if (results.size() < 2 || !results[1].ok()) {
                 reply_error(r, HttpStatus::internal_server_error, "query failed");
                 conn->send_response(r);
