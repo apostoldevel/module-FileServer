@@ -16,7 +16,7 @@ How it works
 1. An HTTP `GET` request arrives at `/file/<path>/<name>`.
 2. The module authenticates the request (Bearer JWT token, session-based authorization, or SID cookie).
 3. Paths under `/public/` are served using a bot session — no user authentication required.
-4. **Fast path:** If the file already exists on the local filesystem, it is served directly with the correct `Content-Type`.
+4. **Fast path:** If the file already exists on the local filesystem, it is served with `sendfile(2)` and the correct `Content-Type` — directly for `/public/*`; on a user session only after `api.authorize()` has confirmed the session and `api.decode_file_access()` the read bit (deferred response).
 5. **Slow path:** The file record is fetched from the database via a PG query, base64-decoded, written to disk, and served (deferred response).
 
 URL format
@@ -50,7 +50,7 @@ Host: localhost:8080
 Related modules
 -
 - **[PGFile](https://github.com/apostoldevel/module-PGFile)** — populates the filesystem: listens to PostgreSQL NOTIFY and writes files to disk when `db.file` records change
-- **db-platform `file` module** — database layer: `db.file` table, UNIX-like permissions, `api.get_file`, REST endpoints
+- **db-platform `file` module** — database layer: `db.file` table, UNIX-like permissions, `api.get_file`, REST endpoints. **Requires db-platform 1.2.22 or later:** a file already in the disk cache is served only after `api.decode_file_access()` says the user may read it — on an older platform that call fails and the request answers 500, never the file. The cold path on such a platform still has no per-file barrier of its own (db-platform patch `P00000022` added it), so the requirement is on the platform, not a courtesy
 
 Installation
 -

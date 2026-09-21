@@ -85,7 +85,8 @@ void FileServer::init_methods()
 //   2. /public/* → use bot session
 //   3. Other → check_auth()
 //   4. File on disk: bot session → serve directly;
-//      user session → api.authorize() first, serve on 't' (deferred)
+//      user session → api.authorize() + api.decode_file_access() first,
+//      serve on authorized = 't' and r = 't' (deferred)
 //   5. Otherwise → deferred PG query (authorize + get_file)
 
 void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
@@ -135,7 +136,9 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
 
     // File already on disk — sendfile(2) zero-copy. Only the module's own
     // (public) session skips the database: a user session is a bare string
-    // until api.authorize() has said 't' (v1 CFileServer::DoGetFile, OnContinue).
+    // until api.authorize() has said 't' (v1 CFileServer::DoGetFile, OnContinue),
+    // and a valid session is not a right to this file — the cache holds copies
+    // of every tenant's files, so the read bit is asked for as well.
     std::error_code ec;
     if (std::filesystem::is_regular_file(local_path, ec) && !ec) {
         resp.set_deferred(true);
@@ -144,7 +147,8 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
             auto ext = local_path.extension().string();
             conn->send_file(local_path.string(), file_mime_type(ext));
         } else {
-            authorize_and_serve(session, std::move(local_path), req.connection_ctx);
+            authorize_and_serve(session, name, path, std::move(local_path),
+                                req.connection_ctx);
         }
         return;
     }
@@ -260,19 +264,47 @@ bool FileServer::authorized(const PgResult& res, std::string& message)
     return false;
 }
 
+// ─── readable ───────────────────────────────────────────────────────────────
+//
+// api.decode_file_access(id) → (r, w, x booleans). Only r = 't' is a yes;
+// 'f' is a 404, the same answer the cold path gives when api.get_file() returns
+// no row. An unknown file arrives here as a NULL id (api.get_file_id found
+// nothing), and CheckFileAccess() decodes a NULL id to 'f', not to NULL.
+
+bool FileServer::readable(const PgResult& res)
+{
+    if (res.rows() == 0)
+        return false;
+    int idx = res.column_index("r");
+    const char* v = idx >= 0 ? res.value(0, idx) : nullptr;
+    return v && v[0] == 't';
+}
+
 // ─── authorize_and_serve ────────────────────────────────────────────────────
 //
 // Mirrors v1 CFileServer::DoGetFile() → OnContinue: the file is cached on disk,
 // but the session is a user's — ask the database first, sendfile(2) on 't'.
+//
+// Two statements on one connection: api.authorize() binds the session to the
+// connection, api.decode_file_access() then answers for that user. The second
+// one is what the cold path gets for free from api.get_file(): the cache is
+// shared by every tenant, so a valid session alone would hand a file to anyone
+// who knows its path once anybody has fetched it. Requires db-platform 1.2.22;
+// on an older platform the statement fails and the answer is 500, not the file.
 
 void FileServer::authorize_and_serve(std::string_view session,
+                                     std::string_view name, std::string_view path,
                                      std::filesystem::path local_path,
                                      std::shared_ptr<void> conn_ctx)
 {
     auto conn = std::static_pointer_cast<HttpConnection>(conn_ctx);
 
-    auto sql = fmt::format("SELECT * FROM api.authorize({})",
-                           pq_quote_literal(std::string(session)));
+    auto sql = fmt::format(
+        "SELECT * FROM api.authorize({});\n"
+        "SELECT r FROM api.decode_file_access(api.get_file_id({}, {}))",
+        pq_quote_literal(std::string(session)),
+        pq_quote_literal(std::string(name)),
+        pq_quote_literal(std::string(path)));
 
     // quiet: the statement carries a session code (see fetch_and_serve).
     pool_.execute(sql,
@@ -281,6 +313,10 @@ void FileServer::authorize_and_serve(std::string_view session,
 
             HttpResponse r;
 
+            // results[0] = authorize, results[1] = decode_file_access. As with
+            // authorized(): a failed statement goes to on_exception (500), so
+            // the !ok() branches below guard against a change in the pool, not
+            // a case seen today.
             if (results.empty() || !results[0].ok()) {
                 reply_error(r, HttpStatus::internal_server_error, "authorize returned no result");
                 conn->send_response(r);
@@ -290,6 +326,18 @@ void FileServer::authorize_and_serve(std::string_view session,
             std::string why;
             if (!authorized(results[0], why)) {
                 reply_error(r, HttpStatus::unauthorized, why);
+                conn->send_response(r);
+                return;
+            }
+
+            if (results.size() < 2 || !results[1].ok()) {
+                reply_error(r, HttpStatus::internal_server_error, "query failed");
+                conn->send_response(r);
+                return;
+            }
+
+            if (!readable(results[1])) {
+                reply_error(r, HttpStatus::not_found, "file not found");
                 conn->send_response(r);
                 return;
             }

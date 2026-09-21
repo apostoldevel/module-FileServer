@@ -31,11 +31,16 @@ class Application;
 //     → /public/* uses bot session (no user auth)
 //     → other paths: check_auth() (JWT Bearer / Session header / __Host-SID cookie)
 //     → file on disk, bot session → sendfile directly
-//     → file on disk, user session → api.authorize() → sendfile (deferred)
+//     → file on disk, user session → api.authorize() + api.decode_file_access()
+//                                    → sendfile on r = 't' (deferred)
 //     → otherwise: api.authorize() + api.get_file() → decode → write → serve (deferred)
 //
 // Nothing leaves the disk on a user session before the database has confirmed it:
-// api.authorize() is the only barrier this module has, and its result is binding.
+// api.authorize() says whether the session is valid, and the file module says
+// whether this user may read this file — api.get_file() returns no row without
+// read access, and api.decode_file_access() (db-platform 1.2.22) gives the same
+// verdict without the bytes for a copy the module already holds on disk. Both
+// results are binding; the disk cache is a copy, not a grant.
 //
 class FileServer final : public ApostolModule
 {
@@ -66,8 +71,10 @@ private:
     /// Parse "/file/some/path/filename.ext" → {path="/some/path/", name="filename.ext"}
     static std::pair<std::string, std::string> parse_file_path(std::string_view url_path);
 
-    /// Async: api.authorize() only, then sendfile(2) of a file already on disk.
+    /// Async: api.authorize() + api.decode_file_access() on the same connection,
+    /// then sendfile(2) of a file already on disk — only when read access is 't'.
     void authorize_and_serve(std::string_view session,
+                             std::string_view name, std::string_view path,
                              std::filesystem::path local_path,
                              std::shared_ptr<void> conn_ctx);
 
@@ -79,6 +86,11 @@ private:
     /// True when the api.authorize() result says authorized = 't';
     /// otherwise fills `message` from the row. Expects a successful result.
     static bool authorized(const PgResult& res, std::string& message);
+
+    /// True when the api.decode_file_access() result says r = 't'.
+    /// Anything else is "no access": 'f' (an unknown file — a NULL id from
+    /// api.get_file_id() — decodes to 'f' as well), a missing row or column.
+    static bool readable(const PgResult& res);
 
     PgPool&               pool_;
     BotSession            bot_;
