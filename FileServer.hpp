@@ -87,6 +87,10 @@ private:
     /// otherwise fills `message` from the row. Expects a successful result.
     static bool authorized(const PgResult& res, std::string& message);
 
+    /// Answer a failed statement: an ERR-401-* refusal → 401, ERR-403-* or
+    /// ERR-400-044 (IP table) → 403, anything else → 500. Never the DB text.
+    static void reply_pg_error(HttpResponse& resp, std::string_view error);
+
     /// True when the api.decode_file_access() result says r = 't'.
     /// Anything else is "no access": 'f' (an unknown file — a NULL id from
     /// api.get_file_id() — decodes to 'f' as well), a missing row or column.

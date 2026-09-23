@@ -95,8 +95,12 @@ void FileServer::do_get(const HttpRequest& req, HttpResponse& resp)
     // so non-ASCII names (e.g. Cyrillic) resolve correctly.
     auto req_path = url_decode(req.path);
 
-    // Safety check
-    if (!is_safe_path(req_path)) {
+    // Safety check. An empty segment is refused as well: "/file//etc/passwd"
+    // parses to path "//etc/", one leading '/' is stripped below, and
+    // files_path_ / "/etc/" is an absolute path that replaces the cache root —
+    // the lookup lands outside it. is_safe_path() does not see that, it only
+    // looks for ".." and NUL.
+    if (!is_safe_path(req_path) || req_path.find("//") != std::string::npos) {
         reply_error(resp, HttpStatus::bad_request, "invalid path");
         return;
     }
@@ -245,7 +249,8 @@ FileServer::parse_file_path(std::string_view url_path)
 // api.authorize(session) → (authorized boolean, userid uuid, message text).
 // The result is binding: anything but 't' means the file is not served.
 // A failed statement never reaches here — with on_exception set, PgPool routes
-// it to the error handler (500); a missing result is the caller's 500 too.
+// it to the error handler (reply_pg_error: 401/403 for a refusal, else 500);
+// a missing result is the caller's 500.
 
 bool FileServer::authorized(const PgResult& res, std::string& message)
 {
@@ -262,6 +267,32 @@ bool FileServer::authorized(const PgResult& res, std::string& message)
     const char* m = midx >= 0 ? res.value(0, midx) : nullptr;
     message = (m && m[0] != '\0') ? m : "Authorization failed";
     return false;
+}
+
+// ─── reply_pg_error ─────────────────────────────────────────────────────────
+//
+// A failed statement of either request lands here with PostgreSQL's text,
+// "ERROR:  ERR-401-002: Authentication failed: ...". api.authorize() does not
+// catch what SessionIn() raises: a locked user, an expired password
+// (AuthenticateError, ERR-401-*) and a host refused by the IP table
+// (LoginIpTableError, ERR-400-044) arrive as exceptions, not as
+// authorized = 'f'. They are refusals, not faults — 401 and 403 (for a user
+// session; the module's own /public/* session fails as 500). Nothing of
+// the database's text goes to the client, a fault is a bare 500; the pool
+// has already logged the full text.
+
+void FileServer::reply_pg_error(HttpResponse& resp, std::string_view error)
+{
+    auto has = [error](std::string_view id) {
+        return error.find(id) != std::string_view::npos;
+    };
+
+    if (has("ERR-401-"))
+        reply_error(resp, HttpStatus::unauthorized, "Unauthorized");
+    else if (has("ERR-403-") || has("ERR-400-044"))
+        reply_error(resp, HttpStatus::forbidden, "Forbidden");
+    else
+        reply_error(resp, HttpStatus::internal_server_error, "Internal Server Error");
 }
 
 // ─── readable ───────────────────────────────────────────────────────────────
@@ -314,7 +345,7 @@ void FileServer::authorize_and_serve(std::string_view session,
             HttpResponse r;
 
             // results[0] = authorize, results[1] = decode_file_access. As with
-            // authorized(): a failed statement goes to on_exception (500), so
+            // authorized(): a failed statement goes to on_exception (reply_pg_error), so
             // the !ok() branches below guard against a change in the pool, not
             // a case seen today.
             if (results.empty() || !results[0].ok()) {
@@ -348,7 +379,7 @@ void FileServer::authorize_and_serve(std::string_view session,
         [conn](std::string_view error) {
             if (conn->closed()) return;
             HttpResponse r;
-            reply_error(r, HttpStatus::internal_server_error, error);
+            reply_pg_error(r, error);
             conn->send_response(r);
         },
         /*quiet=*/true);
@@ -498,11 +529,15 @@ void FileServer::fetch_and_serve(std::string_view session,
                 conn->send_response(r);
             }
         },
-        // on_exception — uses free reply_error (with json_escape, fixing the security bug)
-        [conn](std::string_view error) {
+        // on_exception. On /public/* the session is the module's own: a refusal
+        // of it is this server's fault, not the client's sign-in — 500, not 401.
+        [conn, is_public = path.substr(0, 8) == "/public/"](std::string_view error) {
             if (conn->closed()) return;
             HttpResponse r;
-            reply_error(r, HttpStatus::internal_server_error, error);
+            if (is_public)
+                reply_error(r, HttpStatus::internal_server_error, "Internal Server Error");
+            else
+                reply_pg_error(r, error);
             conn->send_response(r);
         },
         /*quiet=*/true);
